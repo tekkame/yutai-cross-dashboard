@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 app.py - 株主優待クロス在庫トラッカー ＆ 実戦意思決定ダッシュボード
-完全サーバーレス（GitHub Actions 自動実行 ＆ Streamlit Cloud）
-超高密度・プロ仕様トレーディングUI（スプレッドシート完全不要版）
+プロ仕様・超高密度（Compact Trading UI）
+- デフォルトソート: 取得参考価格が安い順 (¥50,000 -> ¥100,000 ...)
+- NumberColumn(format="¥%,d") による美しい通貨表示
+- 限界日は D-XX (整数) 表記
+- 高速ウォッチリスト切り替え & フリーズ完全根絶
 """
 
 from __future__ import annotations
@@ -40,7 +43,6 @@ html, body, [class*="css"] {
     letter-spacing: -0.015em;
 }
 
-/* 全画面パディング極小化 */
 .main .block-container {
     padding-top: 0.5rem !important;
     padding-bottom: 1.2rem !important;
@@ -49,7 +51,6 @@ html, body, [class*="css"] {
     max-width: 100% !important;
 }
 
-/* ナビステータスバー */
 .status-bar {
     display: flex;
     justify-content: space-between;
@@ -89,9 +90,9 @@ html, body, [class*="css"] {
 .tag-green  { background: #064e3b; color: #6ee7b7; border: 1px solid #10b981; }
 .tag-amber  { background: #78350f; color: #fde68a; border: 1px solid #f59e0b; }
 .tag-red    { background: #7f1d1d; color: #fca5a5; border: 1px solid #ef4444; }
+.tag-purple { background: #581c87; color: #f0abfc; border: 1px solid #9333ea; }
 .tag-gray   { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
 
-/* 緊急アラート速報バナー */
 .alert-banner-danger {
     background: #450a0a;
     border: 1px solid #dc2626;
@@ -119,7 +120,6 @@ html, body, [class*="css"] {
     gap: 0.4rem;
 }
 
-/* KPIミニチップ */
 .kpi-row {
     display: flex;
     gap: 0.35rem;
@@ -158,7 +158,6 @@ html, body, [class*="css"] {
     font-family: 'JetBrains Mono', monospace;
 }
 
-/* フォーム部品の極小化 */
 div[data-testid="stVerticalBlock"] > div {
     gap: 0.25rem !important;
 }
@@ -202,10 +201,10 @@ st.markdown(ULTRA_COMPACT_CSS, unsafe_allow_html=True)
 # ============================================================
 DATA_DIR = Path("data")
 WATCHLIST_FILE = Path("data/watchlist.json")
-APP_VERSION = "v2.2 (Pure-Serverless Engine)"
+APP_VERSION = "v2.3 (Precision Pipeline)"
 
 # ============================================================
-# 3. 堅牢な数値変換・フォーマッター
+# 3. 堅牢なフォーマッター
 # ============================================================
 def to_float(v: Any) -> Optional[float]:
     if v is None or pd.isna(v) or v == "":
@@ -216,9 +215,13 @@ def to_float(v: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
-def fmt_int(v: Any) -> str:
+def to_int(v: Any) -> Optional[int]:
     f = to_float(v)
-    return f"{int(round(f)):,}" if f is not None else "―"
+    return int(round(f)) if f is not None else None
+
+def fmt_int(v: Any) -> str:
+    i = to_int(v)
+    return f"{i:,}" if i is not None else "―"
 
 def fmt_float(v: Any, digits: int = 1) -> str:
     f = to_float(v)
@@ -228,6 +231,8 @@ def fmt_qty(v: Any) -> str:
     f = to_float(v)
     if f is None:
         return "―"
+    if f >= 9999990:
+        return "大量"
     if f >= 10000:
         return f"{f/10000:.1f}万"
     return f"{int(f):,}"
@@ -243,7 +248,9 @@ def parse_qty_safe(v: Any) -> Optional[float]:
         return None
     if "残無" in s or s in ("×", "✕"):
         return 0.0
-    if "大量" in s or s in ("◎", "▲"):
+    if "大量" in s:
+        return 9999999.0
+    if s in ("◎", "▲"):
         return None
     m = re.search(r"^([\d.]+)万$", s)
     if m:
@@ -266,10 +273,9 @@ def fmt_code(v: Any) -> str:
     return s.zfill(4) if len(s) <= 4 and s.isdigit() else s
 
 # ============================================================
-# 4. ウォッチリスト（監視銘柄）永続化マネージャー
+# 4. ウォッチリスト管理
 # ============================================================
 def load_watchlist() -> List[str]:
-    """監視銘柄コード一覧を読み込み (初期値は利回り>=1% かつ 資金<=30万円の注目銘柄)"""
     if WATCHLIST_FILE.exists():
         try:
             codes = json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
@@ -277,26 +283,22 @@ def load_watchlist() -> List[str]:
                 return [fmt_code(c) for c in codes]
         except Exception:
             pass
-    # デフォルト初期監視候補 (例: ヤマダ9831, サンリオ8136, コジマ7513など)
     return ["9831", "8136", "7513", "3679", "7458", "3778", "7419", "3844"]
 
 def save_watchlist(codes: List[str]):
-    """監視銘柄をJSONファイルに保存"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     clean_codes = sorted(list(set(fmt_code(c) for c in codes if c)))
     WATCHLIST_FILE.write_text(json.dumps(clean_codes, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # ============================================================
-# 5. データローダー（リポジトリ内 data/ の全CSVを自動統合）
+# 5. データローダー
 # ============================================================
 @st.cache_data(ttl=60, show_spinner=False)
 def load_all_local_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """data/ ディレクトリ内の過去スナップショットCSVをすべて時系列統合"""
     hist_dfs = []
     latest_master = pd.DataFrame()
 
     if DATA_DIR.exists():
-        # 履歴CSVをすべて時系列順で読み込み
         h_files = sorted([DATA_DIR / f for f in os.listdir(DATA_DIR) if f.startswith("history_") and f.endswith(".csv")])
         for hf in h_files:
             try:
@@ -306,7 +308,6 @@ def load_all_local_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
             except Exception:
                 pass
 
-        # 最新のマスタCSV
         m_files = sorted([DATA_DIR / f for f in os.listdir(DATA_DIR) if f.startswith("master_") and f.endswith(".csv")], reverse=True)
         if m_files:
             try:
@@ -333,8 +334,7 @@ def normalize_history(df: pd.DataFrame) -> pd.DataFrame:
         "日興在庫": "nikko", "楽天在庫": "rakuten", "カブ在庫": "kabu",
         "SBI在庫": "sbi", "SBI信号": "sbi", "GMO在庫": "gmo", "GMO信号": "gmo",
         "松井信号": "matsui", "マネ信号": "monex",
-        "売建上限": "gmo_limit", "資金(万)": "funds_man", "必要資金(万)": "funds_man",
-        "優待価値": "yutai_value", "株価": "kabuka", "株数": "kabusu",
+        "株価": "kabuka", "株数": "kabusu", "貸株コスト": "cost",
         "Rtn_楽天": "rtn_rakuten", "Rtn_日興": "rtn_nikko", "Rtn_SBI": "rtn_sbi"
     }
     for orig, standard in col_map.items():
@@ -375,7 +375,7 @@ def normalize_master(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 # ============================================================
-# 6. 分析・シグナル算出エンジン（SBI急変 ＆ 日興推移）
+# 6. 分析・シグナル算出エンジン
 # ============================================================
 def analyze_stocks(
     df_hist: pd.DataFrame,
@@ -387,7 +387,6 @@ def analyze_stocks(
     if df_hist is None or df_hist.empty:
         return pd.DataFrame(), {}
 
-    # 全取得日時 (時系列順)
     all_timestamps = df_hist["timestamp"].dropna().unique().tolist()
     latest_ts = all_timestamps[-1] if all_timestamps else ""
     prev_ts = all_timestamps[-2] if len(all_timestamps) >= 2 else None
@@ -406,30 +405,28 @@ def analyze_stocks(
         prev_row = prev_map.get(code)
         m_row = mast_map.get(code, {})
 
-        # 在庫数値
         nikko_now = to_float(row.get("nikko"))
         rakuten_now = to_float(row.get("rakuten"))
         kabu_now = to_float(row.get("kabu"))
 
-        # 信号 (ルーティン側◎▲× または Gokigen側2/1/0)
-        sbi_now_raw = str(row.get("rtn_sbi") or row.get("sbi") or "―").strip()
-        sbi_now = "◎" if sbi_now_raw in ("◎", "2") else ("▲" if sbi_now_raw in ("▲", "1") else ("×" if sbi_now_raw in ("×", "0", "残無") else sbi_now_raw))
+        sbi_now_raw = str(row.get("sbi") or row.get("rtn_sbi") or "―").strip()
+        sbi_now = "◎" if "◎" in sbi_now_raw or sbi_now_raw == "2" else ("▲" if "▲" in sbi_now_raw or sbi_now_raw == "1" else ("×" if "×" in sbi_now_raw or "✕" in sbi_now_raw or sbi_now_raw == "0" else sbi_now_raw))
 
-        gmo_now = str(row.get("gmo") or "―").strip()
+        gmo_now = str(row.get("gmo") or m_row.get("gmo_limit") or "―").strip()
         matsui_now = str(row.get("matsui") or "―").strip()
         monex_now = str(row.get("monex") or "―").strip()
 
         nikko_prev = to_float(prev_row.get("nikko")) if prev_row is not None else None
         rakuten_prev = to_float(prev_row.get("rakuten")) if prev_row is not None else None
 
-        sbi_prev_raw = str(prev_row.get("rtn_sbi") or prev_row.get("sbi") or "―").strip() if prev_row is not None else "―"
-        sbi_prev = "◎" if sbi_prev_raw in ("◎", "2") else ("▲" if sbi_prev_raw in ("▲", "1") else ("×" if sbi_prev_raw in ("×", "0", "残無") else sbi_prev_raw))
+        sbi_prev_raw = str(prev_row.get("sbi") or prev_row.get("rtn_sbi") or "―").strip() if prev_row is not None else "―"
+        sbi_prev = "◎" if "◎" in sbi_prev_raw or sbi_prev_raw == "2" else ("▲" if "▲" in sbi_prev_raw or sbi_prev_raw == "1" else ("×" if "×" in sbi_prev_raw or "✕" in sbi_prev_raw or sbi_prev_raw == "0" else sbi_prev_raw))
 
-        # 1. 日興前日比 & 推移テキスト
+        # 1. 日興前日比 & 推移
         nikko_diff = (nikko_now - nikko_prev) if (nikko_now is not None and nikko_prev is not None) else None
         nikko_trend_str = f"{fmt_qty(nikko_prev)} → {fmt_qty(nikko_now)}" if prev_ts else fmt_qty(nikko_now)
 
-        # 2. SBI急変検知 (◎→▲ / ◎→×)
+        # 2. SBI急変検知
         is_sbi_sudden_drop = False
         if prev_ts:
             if sbi_prev == "◎" and sbi_now == "▲":
@@ -438,10 +435,10 @@ def analyze_stocks(
             elif sbi_prev == "◎" and sbi_now == "×":
                 sbi_change = "💥瞬殺(◎→×)"
                 is_sbi_sudden_drop = True
-            elif sbi_prev != sbi_now:
+            elif sbi_prev != sbi_now and sbi_prev != "―":
                 sbi_change = f"{sbi_prev}→{sbi_now}"
             else:
-                sbi_change = f"{sbi_now}(維持)"
+                sbi_change = f"{sbi_now}(維持)" if sbi_now in ("◎", "▲", "×") else sbi_now
         else:
             sbi_change = sbi_now
 
@@ -457,8 +454,7 @@ def analyze_stocks(
         valid_qtys = [q for q in [nikko_now, rakuten_now, kabu_now] if q is not None]
         total_qty = sum(valid_qtys) if valid_qtys else None
 
-        # 5. 意思決定シグナル (最重要)
-        # 🔴 今夜確保: SBI急変/瞬殺 かつ 日興 <= 警戒閾値
+        # 5. シグナル判定
         if is_sbi_sudden_drop and (nikko_now is not None and nikko_now <= nikko_th):
             signal = "🔴 今夜確保"
             signal_rank = 1
@@ -479,8 +475,12 @@ def analyze_stocks(
             signal_rank = 3
 
         # 6. コスト & 実質純利益 & 限界日
-        yutai_val = to_float(row.get("yutai_value") or m_row.get("yutai_value"))
-        funds_man = to_float(row.get("funds_man") or m_row.get("funds_man"))
+        yutai_val = to_float(m_row.get("yutai_value") or row.get("yutai_value"))
+        funds_man = to_float(m_row.get("funds_man") or row.get("funds_man"))
+
+        # 取得参考価格 (円単位の純粋な整数)
+        funds_yen = int(round(funds_man * 10000)) if funds_man is not None and funds_man > 0 else 99999999
+
         days_left_raw = str(row.get("days_left") or "10").replace("D-", "")
         try:
             d_n = int(days_left_raw)
@@ -491,7 +491,7 @@ def analyze_stocks(
         kabusu = to_float(row.get("kabusu")) or 100.0
 
         net_profit = None
-        limit_days = None
+        limit_days_int = None
 
         if kabuka and kabusu and d_n:
             try:
@@ -499,9 +499,9 @@ def analyze_stocks(
                 daily_cost = principal * annual_rate / 365.0
                 cost = round(daily_cost * d_n)
                 if yutai_val is not None:
-                    net_profit = round(yutai_val - cost)
+                    net_profit = int(round(yutai_val - cost))
                     if daily_cost > 0:
-                        limit_days = int(yutai_val / daily_cost)
+                        limit_days_int = int(round(yutai_val / daily_cost))
             except Exception:
                 pass
 
@@ -528,11 +528,12 @@ def analyze_stocks(
             "monex_now": monex_now,
             "total_qty": total_qty,
             "funds_man": funds_man,
+            "funds_yen": funds_yen,
             "yutai_value": yutai_val,
             "yutai_content": str(m_row.get("yutai_content") or ""),
             "yield_pct": to_float(m_row.get("yield_pct")),
             "net_profit": net_profit,
-            "limit_days": limit_days,
+            "limit_days_int": limit_days_int,
             "days_left": d_n,
         })
 
@@ -553,23 +554,22 @@ def analyze_stocks(
 # 7. メインUIレンダリング
 # ============================================================
 def main():
-    # ウォッチリスト（監視銘柄）のセッション管理
     if "watchlist" not in st.session_state:
         st.session_state["watchlist"] = load_watchlist()
 
-    # サイドバー（設定 ＆ 監視銘柄編集）
+    # サイドバー
     with st.sidebar:
-        st.markdown("### ⚙️ 設定 ＆ 監視管理")
+        st.markdown("### ⚙️ 監視設定 ＆ 判定条件")
         nikko_th = st.number_input("日興 警戒閾値 (株)", min_value=1000, max_value=100000, value=10000, step=1000)
         annual_rate = st.number_input("貸株年率", min_value=0.001, max_value=0.05, value=0.011, step=0.001, format="%.3f")
 
         st.markdown("---")
-        st.markdown("#### ⭐ 監視銘柄 (ウォッチリスト) 管理")
-        all_local_hist, all_local_mast = load_all_local_data()
-        all_codes = sorted(all_local_hist["コード"].astype(str).unique().tolist()) if not all_local_hist.empty else []
+        st.markdown("#### ⭐ 監視銘柄一括管理")
+        raw_h, raw_m = load_all_local_data()
+        all_codes = sorted(raw_h["コード"].astype(str).unique().tolist()) if not raw_h.empty else []
 
         selected_watches = st.multiselect(
-            "監視銘柄の選択",
+            "監視銘柄の選択・解除",
             options=all_codes,
             default=[c for c in st.session_state["watchlist"] if c in all_codes],
             format_func=lambda c: f"{fmt_code(c)}"
@@ -577,23 +577,17 @@ def main():
         if st.button("💾 監視リストを保存", use_container_width=True):
             st.session_state["watchlist"] = selected_watches
             save_watchlist(selected_watches)
-            st.success("監視リストを保存しました！")
+            st.success("監視リストを更新しました！")
             st.rerun()
 
-        st.markdown("---")
-        st.markdown("""
-        **💡 運用のヒント**:
-        - 平日 17:00 / 20:00 に GitHub Actions が完全自動でデータを更新します。
-        - 自宅サーバーやPC、スプレッドシートは一切不要です。
-        """)
-        st.caption(f"Yutai Cross {APP_VERSION}")
+        st.caption(f"Yutai Cross Tracker {APP_VERSION}")
 
     # データロード
     raw_hist, raw_mast = load_all_local_data()
     if raw_hist is None or raw_hist.empty:
-        st.warning("⚠️ `data/` に在庫データが見つかりません。画面上の「⚡ 今すぐスクレイピング」を押すか、GitHub Actionsの実行をお待ちください。")
-        if st.button("⚡ 今すぐスクレイピングを実行してデータを生成"):
-            with st.spinner("データを取得中..."):
+        st.warning("⚠️ 在庫データがまだ生成されていません。「⚡ 今すぐスクレイピング」を押してください。")
+        if st.button("⚡ 今すぐスクレイピング実行"):
+            with st.spinner("取得中..."):
                 os.system("python main.py --dry-run --out-dir data")
                 st.cache_data.clear()
                 st.rerun()
@@ -608,7 +602,7 @@ def main():
         annual_rate=annual_rate
     )
 
-    # 1. ナビステータスバー (1行集約)
+    # 1. ナビステータスバー
     st.markdown(f"""
     <div class="status-bar">
         <div class="status-bar-title">
@@ -624,7 +618,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # 2. 緊急アラート速報バナー（SBI急変 / 今夜確保）
+    # 2. 緊急アラート速報バナー
     tonight_df = df_analyzed[df_analyzed["signal"] == "🔴 今夜確保"]
     sbi_drop_df = df_analyzed[df_analyzed["is_sbi_drop"] == True]
 
@@ -681,7 +675,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # 4. クイック操作バー（インライン）
+    # 4. クイック操作バー
     c_f1, c_f2, c_f3, c_f4, c_f5 = st.columns([2.5, 2.2, 1.3, 1.2, 0.8])
     with c_f1:
         query = st.text_input("検索", placeholder="🔍 コード・銘柄名・優待内容 (例: 9831, ヤマダ, ギフト)", label_visibility="collapsed")
@@ -694,7 +688,7 @@ def main():
             label_visibility="collapsed"
         )
     with c_f3:
-        view_mode = st.radio("表示対象", ["⭐ 監視のみ", "全474件"], horizontal=True, label_visibility="collapsed")
+        view_mode = st.radio("表示対象", ["⭐ 監視のみ", "全銘柄"], horizontal=True, label_visibility="collapsed")
     with c_f4:
         only_nikko = st.checkbox("日興あり", value=False)
     with c_f5:
@@ -702,7 +696,7 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-    # フィルタリング適用
+    # フィルタリング
     filtered_df = df_analyzed.copy()
 
     if view_mode == "⭐ 監視のみ":
@@ -730,15 +724,18 @@ def main():
             filtered_df["yutai_content"].astype(str).str.lower().str.contains(q)
         ]
 
-    # メインタブ
+    # デフォルトソート: 取得参考価格が安い順 (5万→10万→20万...)
+    filtered_df = filtered_df.sort_values(by="funds_yen", ascending=True)
+
+    # タブ
     tab1, tab2, tab3 = st.tabs([
         f"⚡ 実戦ボード ({len(filtered_df)}件)",
         "📊 日興在庫 推移チャート",
-        "💡 アプリ構成＆運用ガイド"
+        "💡 運用ガイド"
     ])
 
     # ----------------------------------------------------
-    # TAB 1: 実戦ボード (超高密度・全情報凝縮)
+    # TAB 1: 実戦ボード
     # ----------------------------------------------------
     with tab1:
         display_rows = []
@@ -753,10 +750,17 @@ def main():
             else:
                 diff_str = "±0"
 
+            # 限界日: 整数または ―
+            limit_str = f"D-{r['limit_days_int']}" if r["limit_days_int"] is not None else "―"
+
+            # 取得参考価格 (純粋なint)
+            p_yen = int(r["funds_yen"]) if r["funds_yen"] < 99999990 else None
+
             display_rows.append({
                 "⭐": "⭐" if r["is_watched"] else "―",
                 "コード": r["code"],
                 "銘柄名": r["name"],
+                "取得参考価格": p_yen,
                 "意思決定": r["signal"],
                 "SBI変化": r["sbi_change"],
                 "日興最新": fmt_qty(r["nikko_now"]),
@@ -766,27 +770,26 @@ def main():
                 "楽天最新": fmt_qty(r["rakuten_now"]),
                 "SBI": r["sbi_now"],
                 "GMO": r["gmo_now"],
-                "純利益": fmt_int(r["net_profit"]),
-                "限界日": f"D-{r['limit_days']}" if r["limit_days"] is not None else "―",
-                "優待価値": fmt_int(r["yutai_value"]),
-                "資金(万)": fmt_float(r["funds_man"], 1),
+                "純利益": to_int(r["net_profit"]),
+                "限界日": limit_str,
+                "優待価値": to_int(r["yutai_value"]),
                 "利回り": f"{fmt_float(r['yield_pct'], 1)}%" if r["yield_pct"] is not None else "―",
                 "補充": r["refill"],
-                "優待内容": r["yutai_content"][:32] if r["yutai_content"] else "―"
+                "優待内容": r["yutai_content"][:35] if r["yutai_content"] else "―"
             })
 
         df_table = pd.DataFrame(display_rows)
 
-        # 優先ソート: シグナル順 (今夜確保→即確保→要監視→待機可→枯渇)
         st.dataframe(
             df_table,
             use_container_width=True,
             hide_index=True,
-            height=600,
+            height=620,
             column_config={
                 "⭐": st.column_config.TextColumn("⭐", width="small"),
                 "コード": st.column_config.TextColumn("コード", width="small"),
                 "銘柄名": st.column_config.TextColumn("銘柄名", width="medium"),
+                "取得参考価格": st.column_config.NumberColumn("取得参考価格", format="¥%,d", width="medium"),
                 "意思決定": st.column_config.TextColumn("意思決定", width="small"),
                 "SBI変化": st.column_config.TextColumn("SBI変化", width="medium"),
                 "日興最新": st.column_config.TextColumn("日興最新", width="small"),
@@ -796,28 +799,26 @@ def main():
                 "楽天最新": st.column_config.TextColumn("楽天", width="small"),
                 "SBI": st.column_config.TextColumn("SBI", width="small"),
                 "GMO": st.column_config.TextColumn("GMO", width="small"),
-                "純利益": st.column_config.TextColumn("純利益", width="small"),
+                "純利益": st.column_config.NumberColumn("純利益", format="¥%,d", width="small"),
                 "限界日": st.column_config.TextColumn("限界日", width="small"),
-                "優待価値": st.column_config.TextColumn("優待(円)", width="small"),
-                "資金(万)": st.column_config.TextColumn("資金(万)", width="small"),
+                "優待価値": st.column_config.NumberColumn("優待(円)", format="¥%,d", width="small"),
                 "利回り": st.column_config.TextColumn("利回り", width="small"),
                 "補充": st.column_config.TextColumn("補充", width="small"),
                 "優待内容": st.column_config.TextColumn("優待内容", width="large"),
             }
         )
 
-        # 選択銘柄の時系列ドリルダウン詳細
+        # 選択銘柄クイック詳細 & 監視ON/OFFトグル (差分1行のみ即座に保存・フリーズゼロ)
         if not filtered_df.empty:
             st.markdown("<div style='height: 2px;'></div>", unsafe_allow_html=True)
             d_col1, d_col2 = st.columns([2.5, 4.5])
             with d_col1:
                 target_code = st.selectbox(
-                    "銘柄を選択して時系列推移を確認",
+                    "銘柄を選択して推移を確認 / 監視切替",
                     options=filtered_df["code"].tolist(),
                     format_func=lambda c: f"{c} {filtered_df[filtered_df['code']==c]['name'].values[0] if len(filtered_df[filtered_df['code']==c])>0 else ''}"
                 )
                 if target_code:
-                    # ワンクリック監視トグル
                     is_in_watch = (target_code in st.session_state["watchlist"])
                     btn_label = "⭐ 監視リストから外す" if is_in_watch else "⭐ この銘柄を監視に追加"
                     if st.button(btn_label, use_container_width=True):
@@ -832,7 +833,6 @@ def main():
                 if target_code:
                     sub_h = df_hist[df_hist["code"] == target_code].copy()
                     if not sub_h.empty:
-                        # 過去の変遷テーブル
                         h_disp = sub_h[["timestamp", "nikko", "rakuten", "kabu", "sbi", "gmo"]].copy()
                         h_disp.columns = ["取得日時", "日興", "楽天", "カブ", "SBI", "GMO"]
                         for col in ["日興", "楽天", "カブ"]:
@@ -866,32 +866,14 @@ def main():
                 st.altair_chart(chart, use_container_width=True)
 
     # ----------------------------------------------------
-    # TAB 3: アプリ構成 ＆ 運用ガイド
+    # TAB 3: 運用ガイド
     # ----------------------------------------------------
     with tab3:
         st.markdown("""
-        ### 💡 アプリの保守・Geminiでの更新方法
+        ### 💡 完全サーバーレス自動運用の仕組み
 
-        #### Q1. 今後の変更は `app.py` だけの差し替えでOKですか？
-        **はい、画面UIやシグナル判定の変更は `app.py` 1ファイルのみの差し替えで100%完結します！**
-        
-        - **データ取得（スクレイパー）**: GitHub Actions（`.github/workflows/daily_update.yml`）が自動で動いて `data/` にCSVを保存。
-        - **画面（ダッシュボード）**: `app.py` が `data/` を読み込んで表示。
-        
-        この2つが完全に分離されているため、画面レイアウトや色の変更、新しい列の追加などはすべて `app.py` を書き換えて push するだけで自動反映されます。
-
-        #### Q2. API上限等でAntigravityが使えない場合、Gemini等のチャットで更新できますか？
-        **はい、完全に可能です！**
-        1. 通常の Gemini（Web版やAPI）に「現在の `app.py`」を貼り付け、「〇〇の列を追加して」や「フォントサイズを変えて」と依頼。
-        2. 生成されたコードで手元の `app.py` を上書き。
-        3. 以下のコマンドを実行するだけで、トークンを使ってGitHubに自動プッシュされ、Streamlit Cloudに即時反映されます：
-        ```powershell
-        python deploy_to_github.py "Update app.py"
-        ```
-
-        #### Q3. 定期実行のタイミングは？
-        - 平日 毎日 **17:00** および **20:00**（JST）に GitHub Actions が自動実行され、最新在庫がリポジトリに追記保存されます。
-        - 自宅PCの電源OFF・スリープ状態でも永久に自動で動き続けます。
+        - **定期自動実行**: 平日 毎日 **17:00** および **20:00**（JST）に GitHub Actions が自動で動き、最新在庫を追記保存します。
+        - **UIの改修**: 画面の変更や調整は `app.py` のみを書き換えて GitHub にプッシュするだけで数秒で反映されます。
         """)
 
 if __name__ == "__main__":

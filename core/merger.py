@@ -1,32 +1,47 @@
-"""データマージエンジン: 4桁コードをキーに Full Outer Join。
-
-- ベースはルーティン側 (厳選銘柄の資金・優待価値・利回り・GMO売建上限)。
-- Gokigen側があれば7社在庫・株価・逆日歩実績で補完。売建上限はルーティン側からのみ付与。
-- どちらのサイトにも載る銘柄を1件も落とさない ( routine-only / gokigen-only も両方行化 )。
-- レコードごとに [取得日時(JST), 権利年月(YYYY-MM), 残日数(D-N)] を付与 (呼び出し側がstamp/d_nを渡す)。
+# -*- coding: utf-8 -*-
 """
+core/merger.py - データマージエンジン (ルーティン最優先マージ)
+
+修正仕様 (3):
+1. [ルーティン株主優待] の約140〜160銘柄を「最優先マスター（Master A）」とする。
+   - コード、銘柄名、資金、優待価値、優待内容、日興、楽天、カブ、SBI(◎▲×)、GMO(売建上限)は
+     ルーティン側の値を絶対に優先する。
+2. [Gokigen Life] のデータは、ルーティン側に存在しない残りの銘柄の補完、
+   および「7社在庫 (松井・マネックス等)」「前日終値」の追加項目としてのみ結合する。
+3. どちらのサイトからも「必要資金」または「優待価値」が拾えなかった銘柄については、
+   優待内容テキスト内の金額から正規表現で自動逆算して補完する。
+"""
+
 from __future__ import annotations
 
 import datetime as dt
 import re
+from typing import Any
 
 import config
+from scrapers.routine_yutai import extract_yutai_value
 
 
-def _fmt(v, ndigits: int = 0):
+def _fmt(v: Any, ndigits: int = 0) -> Any:
     if v is None or v == "":
         return ""
-    if isinstance(v, float) and ndigits == 0 and v.is_integer():
-        return int(v)
-    return round(v, ndigits) if isinstance(v, float) else v
+    if isinstance(v, float):
+        if ndigits == 0 and v.is_integer():
+            return int(v)
+        return round(v, ndigits)
+    return v
 
 
-def estimate_cost(kabuka, kabusu, cross_days, fallback_days: int,
-                  annual_rate: float | None = None) -> float | None:
-    """今日クロスした場合の貸株料概算 = 株価格×株数×年率×日数/365。"""
+def estimate_cost(
+    kabuka: float | None,
+    kabusu: float | None,
+    cross_days: float | None,
+    fallback_days: int,
+    annual_rate: float | None = None
+) -> float | None:
     rate = config.KASHIKABU_ANNUAL_RATE if annual_rate is None else annual_rate
     try:
-        total = float(kabuka) * float(kabusu or 100)
+        total = float(kabuka or 0) * float(kabusu or 100)
     except (TypeError, ValueError):
         return None
     days = cross_days if cross_days else fallback_days
@@ -35,27 +50,40 @@ def estimate_cost(kabuka, kabusu, cross_days, fallback_days: int,
     return round(total * rate * float(days) / 365)
 
 
-WATCH_FIELDS = {
-    "yield": "total_yield", "funds": "funds_man", "value": "yutai_value",
-    "rakuten": "rakuten", "nikko": "nikko", "kabu": "kabu",
-    "cost": "cost", "maxgyaku": "max_gyaku",
-}
+def _seido_text(g: dict | None) -> str:
+    if not g:
+        return ""
+    kisei = g.get("recent_gyaku_kisei") or ""
+    max_gyaku = g.get("max5_gyaku")
+    parts = []
+    if kisei:
+        parts.append(f"注意喚起:{kisei}")
+    if max_gyaku:
+        parts.append(f"max逆日歩:{_fmt(max_gyaku)}")
+    return " / ".join(parts)
 
 
 def parse_watch(expr: str):
-    """'yield>=1,funds<=30,rakuten>0' → すべて満たせばTrueの述語。"""
+    """'yield>=1,funds<=30,rakuten>0' → 条件述語"""
+    watch_fields = {
+        "yield": "total_yield", "funds": "funds_man", "value": "value",
+        "rakuten": "rakuten", "nikko": "nikko", "kabu": "kabu",
+        "cost": "cost", "maxgyaku": "max_gyaku",
+    }
     conds = []
     for tok in (expr or "").split(","):
         tok = tok.strip()
         if not tok:
             continue
         m = re.fullmatch(r"([a-z]+)\s*(>=|<=|>|<|=)\s*([\d.]+)", tok)
-        if not m or m.group(1) not in WATCH_FIELDS:
-            raise ValueError(f"--auto-watch の条件が不正: {tok} (例: yield>=1,funds<=30)")
+        if not m or m.group(1) not in watch_fields:
+            continue
         field, op, num = m.group(1), m.group(2), float(m.group(3))
-        ops = {">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
-               ">": lambda a, b: a > b, "<": lambda a, b: a < b, "=": lambda a, b: a == b}
-        conds.append((WATCH_FIELDS[field], ops[op], num))
+        ops = {
+            ">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
+            ">": lambda a, b: a > b, "<": lambda a, b: a < b, "=": lambda a, b: a == b
+        }
+        conds.append((watch_fields[field], ops[op], num))
 
     def pred(row: dict) -> bool:
         for key, op, num in conds:
@@ -72,74 +100,151 @@ def parse_watch(expr: str):
     return pred
 
 
-def _seido_text(g: dict | None) -> str:
-    kisei = (g.get("recent_gyaku_kisei") or "") if g else ""
-    max_gyaku = (g.get("max5_gyaku") if g else None)
-    return " / ".join(x for x in [
-        f"注意喚起:{kisei}" if kisei else "",
-        f"max逆日歩:{_fmt(max_gyaku)}" if max_gyaku else "",
-    ] if x)
-
-
-def build_rows(rights: str, today: dt.date, stamp: str, d_n: int, kengi: dt.date,
-               routine: list[dict], gmap: dict[str, dict]) -> tuple[list[list], list[list]]:
-    """history行とmaster行を生成する。コードの和集合で回す Full Outer Join。
-
-    rmap: routineレコード、gmap: gokigenレコード。gokigen-only銘柄は
-    優待内容=gokigenのyutai文面、必要資金=株価×株数、利回り=rimawariで補完する。
-    """
+def build_rows(
+    rights: str,
+    today: dt.date,
+    stamp: str,
+    d_n: int,
+    kengi: dt.date,
+    routine: list[dict],
+    gmap: dict[str, dict]
+) -> tuple[list[list], list[dict]]:
+    """ルーティン最優先マージで history行 と master行 を生成"""
     history: list[list] = []
-    master: list[list] = []
+    master: list[dict] = []
     cal_days_left = max((kengi - today).days, 0)
     rmap = {r["code"]: r for r in routine}
-    for code in sorted(set(rmap) | set(gmap)):
+
+    all_codes = sorted(set(rmap) | set(gmap))
+
+    for code in all_codes:
         r = rmap.get(code)
         g = gmap.get(code, {})
-        stocks = g.get("stocks", {}) if g else {}
-        funds_man = r["funds_man"] if r else None
-        kabuka = (g.get("kabuka") if g else None) or (
-            (funds_man * 10000 / 100) if funds_man else None)
-        kabusu = (g.get("kabusu") if g else None) or 100
-        if funds_man is None and kabuka:
-            try:
-                funds_man = kabuka * float(kabusu or 100) / 10000
-            except (TypeError, ValueError):
-                funds_man = None
-        cross_days = g.get("cross_days") if g else None
+
+        # 1. 銘柄名 (ルーティン最優先)
+        name = (r.get("name") if r else None) or g.get("name") or ""
+        if not name or name.lower() in ("null", "nan"):
+            continue
+
+        # 2. 優待内容 (ルーティン最優先)
+        content = (r.get("yutai_content") if r else None) or g.get("yutai_content") or g.get("yutai") or ""
+
+        # 3. 優待価値 (ルーティン最優先、なければGokigen、なければテキストから逆算)
+        yutai_val = (r.get("yutai_value") if r else None)
+        if yutai_val is None or yutai_val == 0:
+            yutai_val = g.get("yutai_value")
+        if yutai_val is None or yutai_val == 0:
+            yutai_val = extract_yutai_value(content)
+
+        # 4. 必要資金(万円) (ルーティン最優先、なければGokigen)
+        funds_man = (r.get("funds_man") if r else None)
+        if funds_man is None:
+            funds_man = g.get("funds_man")
+
+        # 株価・株数
+        kabuka = g.get("stock_price") or g.get("kabuka")
+        kabusu = g.get("kabusu") or 100.0
+        if funds_man is None and kabuka and kabuka > 0:
+            funds_man = round(kabuka * kabusu / 10000, 2)
+        elif kabuka is None and funds_man and funds_man > 0:
+            kabuka = round(funds_man * 10000 / kabusu, 1)
+
+        # 5. 利回り (ルーティン最優先)
+        yield_pct = (r.get("yield_pct") if r else None)
+        if yield_pct is None:
+            yield_pct = g.get("yield_pct")
+        if (yield_pct is None or yield_pct == 0) and funds_man and yutai_val and funds_man > 0:
+            yield_pct = round((yutai_val / (funds_man * 10000)) * 100, 2)
+
+        # 6. 在庫数値 (ルーティン最優先)
+        # 日興
+        nikko_qty = (r.get("nikko_qty") if r else None)
+        if nikko_qty is None and g:
+            nikko_qty = g.get("nikko_qty")
+
+        # 楽天
+        rakuten_qty = (r.get("rakuten_qty") if r else None)
+        if rakuten_qty is None and g:
+            rakuten_qty = g.get("rakuten_qty")
+
+        # カブ
+        kabu_qty = g.get("kabu_qty")
+
+        # 7. SBI信号 (ルーティン最優先: ◎, ▲, ×)
+        sbi_signal = (r.get("sbi_signal") if r else None)
+        if not sbi_signal or sbi_signal == "―":
+            sbi_signal = g.get("sbi_signal") or "―"
+
+        # 8. GMO信号 / 売建上限
+        gmo_limit = (r.get("gmo_limit") if r else None)
+        gmo_signal = g.get("gmo_signal") or "―"
+        if r and r.get("gmo_qty") is not None:
+            gmo_signal = str(_fmt(r.get("gmo_qty")))
+
+        # 9. 松井・マネックス
+        matsui_signal = g.get("matsui_signal") or "―"
+        monex_signal = g.get("monex_signal") or "―"
+
+        # 貸株コスト試算
+        cross_days = g.get("cross_days")
         cost = estimate_cost(kabuka, kabusu, cross_days, cal_days_left)
-        rimawari = g.get("rimawari") if g else None
-        total_yield = (round(rimawari * 100, 2) if rimawari
-                       else (r["yield_pct"] if r else None))
-        max_gyaku = (g.get("max5_gyaku") if g else None)
-        name = (r["name"] if r else None) or (g.get("name") if g else "") or ""
+        max_gyaku = g.get("max5_gyaku")
+
+        # raw_history行 (全20列)
         history.append([
-            stamp, rights, d_n, code, name,
-            _fmt(stocks.get("日興")), _fmt(stocks.get("カブ")), _fmt(stocks.get("楽天")),
-            _fmt(stocks.get("SBI")), _fmt(stocks.get("GMO")),
-            _fmt(stocks.get("松井")), _fmt(stocks.get("マネ")),
-            _fmt(kabuka), _fmt(kabusu), _fmt(cross_days), _fmt(cost), _fmt(max_gyaku),
-            _fmt(r["rakuten_qty"]) if r else "",
-            _fmt(r["nikko_qty"]) if r else "",
-            r["sbi_signal"] if r else "",
+            stamp,
+            rights,
+            d_n,
+            code,
+            name,
+            _fmt(nikko_qty),
+            _fmt(kabu_qty),
+            _fmt(rakuten_qty),
+            sbi_signal,
+            gmo_signal,
+            matsui_signal,
+            monex_signal,
+            _fmt(kabuka),
+            _fmt(kabusu),
+            _fmt(cross_days),
+            _fmt(cost),
+            _fmt(max_gyaku),
+            _fmt(r.get("rakuten_qty") if r else None),
+            _fmt(r.get("nikko_qty") if r else None),
+            sbi_signal,
         ])
+
+        # master行
         master.append({
-            "watch": False, "priority": "",
-            "code": code, "name": name,
-            "content": (r["yutai_content"] if r else None) or (g.get("yutai") if g else "") or "",
-            "value": _fmt(r["yutai_value"]) if r else "",
+            "watch": False,
+            "priority": "",
+            "code": code,
+            "name": name,
+            "content": content,
+            "value": _fmt(yutai_val),
             "funds_man": _fmt(funds_man),
-            "total_yield": total_yield if total_yield not in (None, "") else "",
-            "gmo_limit": _fmt(r["gmo_limit"]) if r else "",
-            "chouki": "", "seido": _seido_text(g),
+            "total_yield": _fmt(yield_pct, 2) if yield_pct is not None else "",
+            "gmo_limit": _fmt(gmo_limit),
+            "chouki": "",
+            "seido": _seido_text(g),
             "rights": rights,
             # auto-watch判定用
-            "rakuten": stocks.get("楽天"), "nikko": stocks.get("日興"),
-            "kabu": stocks.get("カブ"), "cost": cost, "max_gyaku": max_gyaku,
+            "rakuten": rakuten_qty,
+            "nikko": nikko_qty,
+            "kabu": kabu_qty,
+            "cost": cost,
+            "max_gyaku": max_gyaku,
         })
+
     return history, master
 
 
 def master_to_rows(master: list[dict]) -> list[list]:
-    return [[m["watch"], m["priority"], m["code"], m["name"], m["content"],
-             m["value"], m["funds_man"], m["total_yield"], m["gmo_limit"],
-             m["chouki"], m["seido"], m["rights"]] for m in master]
+    return [
+        [
+            m["watch"], m["priority"], m["code"], m["name"], m["content"],
+            m["value"], m["funds_man"], m["total_yield"], m["gmo_limit"],
+            m["chouki"], m["seido"], m["rights"]
+        ]
+        for m in master
+    ]
