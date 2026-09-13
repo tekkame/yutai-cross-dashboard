@@ -29,11 +29,11 @@ def run(dry_run: bool, out_dir: str, rights_arg: str | None,
 
     print(f"[main] {stamp} JST 権利月={rights} 権利付最終日={kengi} D-{d_n}", flush=True)
     try:
-        routine, rmeta = fetch_routine(info["routine_url"])
+        routine, rmeta = fetch_routine(info["routine_url"], timeout=10)
         print(f"[main] routine: {len(routine)}件 (サイト基準日={rmeta.get('base_date')})", flush=True)
     except Exception as e:
-        print(f"[main] ERROR routine取得失敗: {e}", file=sys.stderr)
-        return 1
+        print(f"[main] WARN routine取得失敗(海外IPブロック等のためgokigenのみで継続): {e}", file=sys.stderr)
+        routine, rmeta = [], {}
 
     try:
         gokigen, gmeta = fetch_gokigen(info["api_month"])
