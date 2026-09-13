@@ -1,0 +1,41 @@
+name: daily_scraper
+
+on:
+  schedule:
+    # 平日 JST 17:00 / 20:00 (UTC 08:00 / 11:00)
+    - cron: '0 8,11 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Scraper
+        run: |
+          python main.py --dry-run --out-dir data
+
+      - name: Commit and Push latest stock data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git commit -m "Auto update stock data: $(date +'%Y-%m-%d %H:%M') JST [skip ci]" || exit 0
+          git push
