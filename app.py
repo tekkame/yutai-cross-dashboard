@@ -264,22 +264,44 @@ def fetch_sheet_csv(sheet_name: str, spreadsheet_id: str = DEFAULT_SPREADSHEET_I
         return None
 
 def load_data(sheet_id: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """スプレッドシートまたはローカルファイルからデータをロード"""
-    raw_hist = fetch_sheet_csv("raw_history", spreadsheet_id=sheet_id)
-    raw_mast = fetch_sheet_csv("master_list", spreadsheet_id=sheet_id)
+    """リポジトリ内の data/ や out/ のCSV、およびGoogleスプレッドシートから柔軟にデータをロード"""
+    hist_dfs = []
+    raw_mast = None
 
-    # 万が一スプレッドシートが取得できない場合のローカルフォールバック (out/ ディレクトリ探索)
-    if (raw_hist is None or raw_hist.empty) and os.path.exists("out"):
-        csv_files = [f for f in os.listdir("out") if f.startswith("history_") and f.endswith(".csv")]
-        if csv_files:
-            csv_files.sort(reverse=True)
-            raw_hist = pd.read_csv(os.path.join("out", csv_files[0]))
-        m_files = [f for f in os.listdir("out") if f.startswith("master_") and f.endswith(".csv")]
-        if m_files:
-            m_files.sort(reverse=True)
-            raw_mast = pd.read_csv(os.path.join("out", m_files[0]))
+    # 1. リポジトリ内 / ローカルの data/ および out/ ディレクトリを探索
+    for dpath in ["data", "out"]:
+        if os.path.exists(dpath):
+            h_files = sorted([os.path.join(dpath, f) for f in os.listdir(dpath) if f.startswith("history_") and f.endswith(".csv")])
+            for hf in h_files:
+                try:
+                    df_tmp = pd.read_csv(hf)
+                    if not df_tmp.empty:
+                        hist_dfs.append(df_tmp)
+                except Exception:
+                    pass
+            m_files = sorted([os.path.join(dpath, f) for f in os.listdir(dpath) if f.startswith("master_") and f.endswith(".csv")], reverse=True)
+            if m_files and raw_mast is None:
+                try:
+                    raw_mast = pd.read_csv(m_files[0])
+                except Exception:
+                    pass
 
-    return raw_hist, raw_mast
+    # 2. Googleスプレッドシートからも取得
+    sheet_hist = fetch_sheet_csv("raw_history", spreadsheet_id=sheet_id)
+    if sheet_hist is not None and not sheet_hist.empty:
+        hist_dfs.append(sheet_hist)
+
+    if raw_mast is None or raw_mast.empty:
+        raw_mast = fetch_sheet_csv("master_list", spreadsheet_id=sheet_id)
+
+    if hist_dfs:
+        combined_hist = pd.concat(hist_dfs, ignore_index=True)
+        time_col = "取得日時" if "取得日時" in combined_hist.columns else combined_hist.columns[0]
+        code_col = "コード" if "コード" in combined_hist.columns else combined_hist.columns[3]
+        combined_hist = combined_hist.drop_duplicates(subset=[time_col, code_col], keep="last")
+        return combined_hist, (raw_mast if raw_mast is not None else pd.DataFrame())
+
+    return pd.DataFrame(), (raw_mast if raw_mast is not None else pd.DataFrame())
 
 def normalize_history(df: pd.DataFrame) -> pd.DataFrame:
     """旧形式(13列)・新形式(20列)の両形式を統一スキーマへ正規化"""
