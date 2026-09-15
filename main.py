@@ -59,6 +59,11 @@ def run(dry_run: bool, out_dir: str, rights_arg: str | None,
     if dry_run:
         import pandas as pd
 
+        if not history:
+            print("[main] ERROR: 取得レコードが0件のためCSVを出力しません"
+                  "（両ソースの取得失敗の可能性。直前のWARNを確認してください）",
+                  file=sys.stderr, flush=True)
+            return 2
         os.makedirs(out_dir, exist_ok=True)
         tag = config.now_jst().strftime("%Y%m%d-%H%M")
         pd.DataFrame(history, columns=config.HISTORY_HEADERS).to_csv(

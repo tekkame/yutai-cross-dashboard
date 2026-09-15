@@ -15,6 +15,8 @@ import io
 import json
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -199,8 +201,9 @@ st.markdown(ULTRA_COMPACT_CSS, unsafe_allow_html=True)
 # ============================================================
 # 2. 定数 & ファイルパス
 # ============================================================
-DATA_DIR = Path("data")
-WATCHLIST_FILE = Path("data/watchlist.json")
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 APP_VERSION = "v2.3 (Precision Pipeline)"
 
 # ============================================================
@@ -272,6 +275,21 @@ def fmt_code(v: Any) -> str:
     s = str(v).split(".")[0].strip()
     return s.zfill(4) if len(s) <= 4 and s.isdigit() else s
 
+def fmt_signal(v: Any) -> str:
+    """SBI/GMO等の信号セルを正規化（旧CSVの 0.0/1.0/2.0 → ×/▲/◎）"""
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return "―"
+    s = str(v).strip()
+    if s in ("", "-", "―", "ー", "null", "None", "nan"):
+        return "―"
+    if s in ("2", "2.0", "◎"):
+        return "◎"
+    if s in ("1", "1.0", "▲"):
+        return "▲"
+    if s in ("0", "0.0", "×", "✕"):
+        return "×"
+    return s
+
 # ============================================================
 # 4. ウォッチリスト管理
 # ============================================================
@@ -289,6 +307,35 @@ def save_watchlist(codes: List[str]):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     clean_codes = sorted(list(set(fmt_code(c) for c in codes if c)))
     WATCHLIST_FILE.write_text(json.dumps(clean_codes, ensure_ascii=False, indent=2), encoding="utf-8")
+
+# ============================================================
+# 4b. 手動スクレイピング実行ヘルパー
+# ============================================================
+def run_scraper(out_dir: Path = DATA_DIR, timeout_sec: int = 300) -> Tuple[bool, str]:
+    """main.py をサブプロセスで実行し、在庫CSVを再取得する。戻り値: (成功, メッセージ)"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    before = {p.name for p in out_dir.glob("history_*.csv")}
+    try:
+        proc = subprocess.run(
+            [sys.executable, "main.py", "--dry-run", "--out-dir", str(out_dir)],
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"タイムアウト（{timeout_sec}秒）: 取得元サイトの応答が遅い可能性があります"
+    except OSError as e:
+        return False, f"実行失敗: {e}"
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        detail = "\n".join(tail[-8:]) if tail else "詳細不明"
+        return False, f"スクレイピング失敗 (exit={proc.returncode}):\n{detail}"
+    new_files = sorted({p.name for p in out_dir.glob("history_*.csv")} - before)
+    if not new_files:
+        return False, "CSVが新規作成されませんでした"
+    return True, f"取得完了: {', '.join(new_files)}"
 
 # ============================================================
 # 5. データローダー
@@ -587,10 +634,14 @@ def main():
     if raw_hist is None or raw_hist.empty:
         st.warning("⚠️ 在庫データがまだ生成されていません。「⚡ 今すぐスクレイピング」を押してください。")
         if st.button("⚡ 今すぐスクレイピング実行"):
-            with st.spinner("取得中..."):
-                os.system("python main.py --dry-run --out-dir data")
+            with st.spinner("取得中（1〜2分かかります）..."):
+                ok, msg = run_scraper()
                 st.cache_data.clear()
+            if ok:
+                st.success(msg)
                 st.rerun()
+            else:
+                st.error(msg)
         return
 
     df_hist = normalize_history(raw_hist)
@@ -676,7 +727,7 @@ def main():
     """, unsafe_allow_html=True)
 
     # 4. クイック操作バー
-    c_f1, c_f2, c_f3, c_f4, c_f5 = st.columns([2.5, 2.2, 1.3, 1.2, 0.8])
+    c_f1, c_f2, c_f3, c_f4, c_f5, c_f6 = st.columns([2.3, 2.0, 1.2, 1.1, 0.7, 0.7])
     with c_f1:
         query = st.text_input("検索", placeholder="🔍 コード・銘柄名・優待内容 (例: 9831, ヤマダ, ギフト)", label_visibility="collapsed")
     with c_f2:
@@ -695,6 +746,16 @@ def main():
         if st.button("🔄 更新", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
+    with c_f6:
+        if st.button("⚡ 取得", use_container_width=True):
+            with st.spinner("取得中（1〜2分）..."):
+                ok, msg = run_scraper()
+                st.cache_data.clear()
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
 
     # フィルタリング
     filtered_df = df_analyzed.copy()
@@ -728,9 +789,10 @@ def main():
     filtered_df = filtered_df.sort_values(by="funds_yen", ascending=True)
 
     # タブ
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         f"⚡ 実戦ボード ({len(filtered_df)}件)",
         "📊 日興在庫 推移チャート",
+        "🗓 日時別マトリクス",
         "💡 運用ガイド"
     ])
 
@@ -753,14 +815,15 @@ def main():
             # 限界日: 整数または ―
             limit_str = f"D-{r['limit_days_int']}" if r["limit_days_int"] is not None else "―"
 
-            # 取得参考価格 (純粋なint)
+            # 取得最低価格 (純粋なint)
             p_yen = int(r["funds_yen"]) if r["funds_yen"] < 99999990 else None
 
             display_rows.append({
                 "⭐": "⭐" if r["is_watched"] else "―",
                 "コード": r["code"],
                 "銘柄名": r["name"],
-                "取得参考価格": p_yen,
+                "取得最低価格": p_yen,
+                "優待内容": r["yutai_content"][:35] if r["yutai_content"] else "―",
                 "意思決定": r["signal"],
                 "SBI変化": r["sbi_change"],
                 "日興最新": fmt_qty(r["nikko_now"]),
@@ -775,7 +838,6 @@ def main():
                 "優待価値": to_int(r["yutai_value"]),
                 "利回り": f"{fmt_float(r['yield_pct'], 1)}%" if r["yield_pct"] is not None else "―",
                 "補充": r["refill"],
-                "優待内容": r["yutai_content"][:35] if r["yutai_content"] else "―"
             })
 
         df_table = pd.DataFrame(display_rows)
@@ -789,7 +851,8 @@ def main():
                 "⭐": st.column_config.TextColumn("⭐", width="small"),
                 "コード": st.column_config.TextColumn("コード", width="small"),
                 "銘柄名": st.column_config.TextColumn("銘柄名", width="medium"),
-                "取得参考価格": st.column_config.NumberColumn("取得参考価格", format="¥%,d", width="medium"),
+                "取得最低価格": st.column_config.NumberColumn("取得最低価格", format="¥%,d", width="medium"),
+                "優待内容": st.column_config.TextColumn("優待内容", width="large"),
                 "意思決定": st.column_config.TextColumn("意思決定", width="small"),
                 "SBI変化": st.column_config.TextColumn("SBI変化", width="medium"),
                 "日興最新": st.column_config.TextColumn("日興最新", width="small"),
@@ -804,7 +867,6 @@ def main():
                 "優待価値": st.column_config.NumberColumn("優待(円)", format="¥%,d", width="small"),
                 "利回り": st.column_config.TextColumn("利回り", width="small"),
                 "補充": st.column_config.TextColumn("補充", width="small"),
-                "優待内容": st.column_config.TextColumn("優待内容", width="large"),
             }
         )
 
@@ -866,9 +928,116 @@ def main():
                 st.altair_chart(chart, use_container_width=True)
 
     # ----------------------------------------------------
-    # TAB 3: 運用ガイド
+    # TAB 3: 日時別 在庫推移マトリクス
     # ----------------------------------------------------
     with tab3:
+        st.markdown("##### 🗓 日時別 在庫推移マトリクス")
+        st.caption("1日2回取得で15日分≒30スナップショット。取得を重ねるほど列が増えます（列ヘッダーにカーソルでフル日時表示）。")
+        BROKER_COLS = {
+            "日興": "nikko", "楽天": "rakuten", "カブ": "kabu",
+            "SBI": "sbi", "GMO": "gmo", "松井": "matsui", "マネックス": "monex",
+        }
+        NUMERIC_BROKERS = {"nikko", "rakuten", "kabu"}
+
+        all_ts = (
+            df_hist.dropna(subset=["timestamp"])
+            .sort_values(["dt", "timestamp"])["timestamp"]
+            .drop_duplicates().tolist()
+        )
+        if len(all_ts) < 2:
+            st.info("スナップショットが1件のみのためマトリクスを表示できません。「⚡ 取得」で取得を重ねると推移が表示されます。")
+        else:
+            mx_watch = [c for c in st.session_state["watchlist"] if c in df_analyzed["code"].tolist()]
+            if not mx_watch:
+                mx_watch = df_analyzed[df_analyzed["nikko_now"].fillna(0) > 0]["code"].head(12).tolist()
+
+            m_c1, m_c2, m_c3 = st.columns([1.0, 1.2, 3.8])
+            with m_c1:
+                mx_broker = st.selectbox("証券会社", options=list(BROKER_COLS.keys()), index=0)
+            with m_c2:
+                n_snap = st.slider("表示スナップショット数", min_value=2,
+                                   max_value=min(30, len(all_ts)),
+                                   value=min(8, len(all_ts)))
+            with m_c3:
+                codes_mx = st.multiselect(
+                    "銘柄を選択 (複数可)",
+                    options=df_analyzed["code"].tolist(),
+                    default=mx_watch[:12],
+                    format_func=lambda c: f"{c} {df_analyzed[df_analyzed['code']==c]['name'].values[0] if len(df_analyzed[df_analyzed['code']==c])>0 else ''}"
+                )
+            if codes_mx:
+                bcol = BROKER_COLS[mx_broker]
+                ts_list = all_ts[-n_snap:]
+                sub = (df_hist[df_hist["code"].isin(codes_mx) & df_hist["timestamp"].isin(ts_list)]
+                       [["code", "timestamp", bcol]]
+                       .sort_values("timestamp")
+                       .drop_duplicates(subset=["code", "timestamp"], keep="last"))
+                piv = sub.pivot_table(index="code", columns="timestamp",
+                                      values=bcol, aggfunc="last", dropna=False)
+                piv = piv.reindex(index=codes_mx, columns=ts_list)
+                # 銘柄名は最新スナップショットの表記に統一（スナップショット間でroutine名/gokigen名が揺れるため）
+                name_map = df_analyzed.drop_duplicates("code").set_index("code")["name"]
+
+                is_numeric = bcol in NUMERIC_BROKERS
+                if is_numeric:
+                    fmt_mx = piv.apply(lambda col: col.map(fmt_qty))
+                else:
+                    fmt_mx = piv.apply(lambda col: col.map(fmt_signal))
+
+                latest_ts, prev_ts = ts_list[-1], ts_list[-2]
+                mx_rows = []
+                for code in codes_mx:
+                    name = name_map.get(code, code)
+                    latest_v = piv.loc[code, latest_ts]
+                    prev_v = piv.loc[code, prev_ts]
+                    if is_numeric:
+                        latest_s = fmt_qty(latest_v)
+                        lf, pf = to_float(latest_v), to_float(prev_v)
+                        if lf is None or pf is None:
+                            diff_s = "―"
+                        elif lf - pf > 0:
+                            diff_s = f"+{int(lf - pf):,}"
+                        elif lf - pf < 0:
+                            diff_s = f"{int(lf - pf):,}"
+                        else:
+                            diff_s = "±0"
+                    else:
+                        latest_s = fmt_signal(latest_v)
+                        prev_s = fmt_signal(prev_v)
+                        diff_s = f"{prev_s}→{latest_s}" if prev_s != latest_s else "維持"
+                    row = {"コード": code, "銘柄名": name, "最新": latest_s, "前回比": diff_s}
+                    for ts in ts_list:
+                        short = ts[5:] if isinstance(ts, str) and len(ts) >= 11 else str(ts)
+                        row[short] = fmt_mx.loc[code, ts]
+                    mx_rows.append(row)
+
+                df_mx = pd.DataFrame(mx_rows)
+                # 実戦ボードと同じ取得最低価格順に並べ替え
+                order = df_analyzed.sort_values("funds_yen")["code"].tolist()
+                df_mx["コード"] = pd.Categorical(df_mx["コード"], categories=order, ordered=True)
+                df_mx = df_mx.sort_values("コード").reset_index(drop=True)
+
+                mx_config = {
+                    "コード": st.column_config.TextColumn("コード", width="small"),
+                    "銘柄名": st.column_config.TextColumn("銘柄名", width="medium"),
+                    "最新": st.column_config.TextColumn("最新", width="small"),
+                    "前回比": st.column_config.TextColumn("前回比", width="small"),
+                }
+                for ts in ts_list:
+                    short = ts[5:] if isinstance(ts, str) and len(ts) >= 11 else str(ts)
+                    mx_config[short] = st.column_config.TextColumn(short, width="small", help=str(ts))
+                st.dataframe(
+                    df_mx,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(640, 80 + 29 * len(df_mx)),
+                    column_config=mx_config,
+                )
+
+    # ----------------------------------------------------
+    # TAB 4: 運用ガイド
+    # ----------------------------------------------------
+    with tab4:
         st.markdown("""
         ### 💡 完全サーバーレス自動運用の仕組み
 

@@ -142,5 +142,5 @@ python main.py                            # Sheets更新（要 環境変数）
 ## スケジュール
 
 `cron: '0 8,11 * * 1-5'`（平日 JST 17:00 / 20:00）＋手動実行（workflow_dispatch）。
-手動実行は `rights`（YYYY-MM、例: `2026-09`）または `year`＋`month`（例: `year=2026`, `month=9`）で
-対象月を指定可能（`rights` が優先、どちらも空欄なら自動解決）。
+手動実行は `rights`（YYYY-MM、例: `2026-09`）または `kengi`（YYYY-MM-DD、例: `2026-10-29`）で
+対象月・権利付最終日を指定可能（どちらも空欄なら自動解決）。

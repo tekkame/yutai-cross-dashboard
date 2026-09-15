@@ -5,6 +5,15 @@ on:
     # 平日 JST 17:00 / 20:00 (UTC 08:00 / 11:00)
     - cron: '0 8,11 * * 1-5'
   workflow_dispatch:
+    inputs:
+      rights:
+        description: '対象権利月 YYYY-MM (空欄で自動解決)'
+        required: false
+        default: ''
+      kengi:
+        description: '権利付最終日 YYYY-MM-DD (空欄で自動算出)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -30,12 +39,40 @@ jobs:
 
       - name: Run Scraper
         run: |
-          python main.py --dry-run --out-dir data
+          args=(--dry-run --out-dir data)
+          [ -n "${{ inputs.rights }}" ] && args+=(--rights "${{ inputs.rights }}")
+          [ -n "${{ inputs.kengi }}" ] && args+=(--kengi "${{ inputs.kengi }}")
+          python main.py "${args[@]}"
+
+      - name: Verify scraped data
+        run: |
+          python -c "
+          import glob
+          h = sorted(glob.glob('data/history_*.csv'))
+          m = sorted(glob.glob('data/master_*.csv'))
+          assert h and m, 'CSVが出力されていません'
+          rows = {}
+          for f in (h[-1], m[-1]):
+              with open(f, encoding='utf-8-sig') as fp:
+                  n = sum(1 for _ in fp) - 1
+              print(f'{f}: {n}行')
+              assert n > 0, f'{f} にデータ行がありません（取得失敗の可能性）'
+              rows[f] = n
+          "
+          {
+            echo "### スクレイピング結果"
+            echo "- 最新history: \`$(ls -t data/history_*.csv | head -1)\`"
+            echo "- 最新master: \`$(ls -t data/master_*.csv | head -1)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Commit and Push latest stock data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
-          git commit -m "Auto update stock data: $(date +'%Y-%m-%d %H:%M') JST [skip ci]" || exit 0
-          git push
+          if git diff --cached --quiet; then
+            echo "変更なしのためpushをスキップします"
+          else
+            git commit -m "Auto update stock data: $(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M') JST [skip ci]"
+            git push
+          fi
