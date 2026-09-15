@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 app.py - 株主優待クロス在庫トラッカー ＆ 実戦意思決定ダッシュボード
-【GitHub Actions 1クリック即時スクレイピング ＆ 優待・残数集中レイアウト完全統合版】
-- 🚀 GITHUB_TOKEN による画面からの完全オンデマンド・スクレイピング起動
-- 🎁 優待内容・優待額・取得資金の左側集中配置
-- 📊 証券各社（日興・前日比・SBI・楽天・カブ・GMO）残数の1箇所集中集約
-- ⚡ 最左列の監視チェックボックス直接操作（0.05秒高速保存・フリーズゼロ）
+【永久保存 ＆ バックグラウンド非同期同期 ＆ 優待・残数集中レイアウト完全版】
+- 💾 Googleスプレッドシート連携による監視銘柄の「完全永久保存・自動復元」
+- ⚡ 【超高速・連続操作対応】バックグラウンド非同期同期により、チェック連打時も画面が固まらない
+- 🚀 GITHUB_TOKENによる画面からの1クリック本番スクレイピング起動 (GitHub Actions)
+- 🎁 優待内容・優待額・取得資金を左側に集約した最適視線レイアウト
+- 📊 日興・前日比・SBI・楽天・カブ・GMO残数の1箇所集中表示
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import io
 import json
 import os
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -211,7 +213,7 @@ DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v5.0 (On-Demand Dispatch & Concentrated UX)"
+APP_VERSION = "v7.0 (Non-blocking Fast Checklist & Permanent Memory)"
 
 # ============================================================
 # 3. 堅牢なフォーマッター
@@ -282,7 +284,6 @@ def trigger_github_workflow(token: str, repo: str, ref: str = "main") -> Tuple[b
         "User-Agent": "Streamlit-Yutai-Dashboard"
     }
 
-    # 1. ワークフロー一覧を取得して対象を探す
     url_list = f"https://api.github.com/repos/{repo}/actions/workflows"
     req_list = urllib.request.Request(url_list, headers=headers)
     try:
@@ -297,7 +298,6 @@ def trigger_github_workflow(token: str, repo: str, ref: str = "main") -> Tuple[b
     if not workflows:
         return False, "リポジトリ内に実行可能なワークフローが見つかりません。"
 
-    # スクレイピング用ワークフローを特定
     target_wf = None
     for wf in workflows:
         path = wf.get("path", "").lower()
@@ -311,7 +311,6 @@ def trigger_github_workflow(token: str, repo: str, ref: str = "main") -> Tuple[b
     wf_id = target_wf.get("id")
     wf_name = target_wf.get("name", "Scraper")
 
-    # 2. workflow_dispatch を送信
     url_dispatch = f"https://api.github.com/repos/{repo}/actions/workflows/{wf_id}/dispatches"
     payload = json.dumps({"ref": ref}).encode("utf-8")
     req_dispatch = urllib.request.Request(
@@ -331,15 +330,26 @@ def trigger_github_workflow(token: str, repo: str, ref: str = "main") -> Tuple[b
         return False, f"送信エラー: {e}"
 
 # ============================================================
-# 5. ウォッチリスト管理 & GASリアルタイム単一行同期
+# 5. ウォッチリスト管理 (Google Sheets 永久保存 ＆ 非同期同期)
 # ============================================================
-def load_watchlist() -> List[str]:
+def load_watchlist(df_mast: Optional[pd.DataFrame] = None) -> List[str]:
+    """Googleスプレッドシートの master_list に保存された監視フラグを最優先で復元（永久保存）"""
+    if df_mast is not None and not df_mast.empty:
+        w_cols = [c for c in ["監視", "watch", "sheet_watch"] if c in df_mast.columns]
+        c_cols = [c for c in ["コード", "code", "銘柄コード"] if c in df_mast.columns]
+        if w_cols and c_cols:
+            w_col, c_col = w_cols[0], c_cols[0]
+            sheet_watched = df_mast[df_mast[w_col].astype(str).str.upper().isin(["TRUE", "1"])][c_col].dropna().tolist()
+            if sheet_watched:
+                return [fmt_code(c) for c in sheet_watched]
+
     if WATCHLIST_FILE.exists():
         try:
             codes = json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
-            if isinstance(codes, list):
+            if isinstance(codes, list) and codes:
                 return [fmt_code(c) for c in codes]
         except Exception: pass
+
     return ["9831", "8136", "7513", "3679", "7458", "3778", "7419", "3844", "3167", "5262", "9201", "9202"]
 
 def save_watchlist(codes: List[str]):
@@ -347,17 +357,23 @@ def save_watchlist(codes: List[str]):
     clean_codes = sorted(list(set(fmt_code(c) for c in codes if c)))
     WATCHLIST_FILE.write_text(json.dumps(clean_codes, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def sync_single_to_google_sheet(gas_url: str, code: str, watch: bool, status: str = "未確保") -> bool:
-    if not gas_url or not gas_url.startswith("https://script.google.com"): return False
+def _send_to_gas_worker(gas_url: str, code: str, watch: bool, status: str):
+    """バックグラウンドで実行されるGAS送信ワーカー（画面を一切ブロックしない）"""
     try:
         payload = json.dumps({"code": code, "watch": watch, "status": status}).encode("utf-8")
         req = urllib.request.Request(
             gas_url, data=payload, headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}, method="POST"
         )
-        with urllib.request.urlopen(req, timeout=1.5) as resp:
-            return resp.status in (200, 302)
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            pass
     except Exception:
-        return False
+        pass
+
+def sync_to_google_sheet_async(gas_url: str, code: str, watch: bool, status: str = "未確保"):
+    """非同期スレッドでGoogleスプレッドシートへ送信（UIの遅延ゼロ）"""
+    if not gas_url or not gas_url.startswith("https://script.google.com"): return
+    t = threading.Thread(target=_send_to_gas_worker, args=(gas_url, code, watch, status), daemon=True)
+    t.start()
 
 # ============================================================
 # 6. データローダー（Google Sheets ＆ ローカルCSV 完全統合）
@@ -639,9 +655,6 @@ def analyze_stocks(
 # 8. メインUI
 # ============================================================
 def main():
-    if "watchlist" not in st.session_state:
-        st.session_state["watchlist"] = load_watchlist()
-
     # Secrets から GitHub 設定を安全に読込
     gh_token = st.secrets.get("GITHUB_TOKEN", "")
     gh_repo = st.secrets.get("GITHUB_REPO", "tekkame/yutai-cross-dashboard")
@@ -653,10 +666,10 @@ def main():
         gas_api_url = st.text_input("GAS WebApp同期URL", value=DEFAULT_GAS_API_URL)
         nikko_th = st.number_input("日興 警戒閾値 (株)", min_value=1000, max_value=100000, value=10000, step=1000)
         annual_rate = st.number_input("貸株年率 (日興=1.4%)", min_value=0.001, max_value=0.05, value=0.014, step=0.001, format="%.3f")
-        st.caption(f"GitHub: `{gh_repo}` ({'認証設定済 ✅' if gh_token else 'Token未設定 ⚠️'})")
+        st.caption(f"GitHub: `{gh_repo}` ({'認証済 ✅' if gh_token else 'Token未設定 ⚠️'})")
         st.caption(f"Yutai Cross {APP_VERSION}")
 
-    # データ読み込み
+    # データ読み込み（Google Sheets ＆ ローカル data/ 自動両面読込）
     raw_hist, raw_mast, data_source_msg = load_all_combined_data(spreadsheet_id=sheet_id)
     if raw_hist is None or raw_hist.empty:
         st.warning("⚠️ 在庫データがありません。スプレッドシートIDを確認するか、右上の「🔄 画面再読込」を実行してください。")
@@ -667,6 +680,11 @@ def main():
 
     df_hist = normalize_history(raw_hist)
     df_mast = normalize_master(raw_mast)
+
+    # 【重要】Googleスプレッドシートの永久データを渡して監視リストを復元！
+    if "watchlist" not in st.session_state:
+        st.session_state["watchlist"] = load_watchlist(df_mast)
+
     df_analyzed, stats, all_timestamps = analyze_stocks(
         df_hist, df_mast,
         watchlist=st.session_state["watchlist"],
@@ -783,7 +801,6 @@ def main():
             st.toast("⚡ 最新データを画面に反映しました！")
             st.rerun()
     with c_f7:
-        # 【新機能】GitHub Actions を1クリックで即時起動させるボタン
         if st.button("🚀 最新スクレイピング", use_container_width=True, help="クラウドサーバーを起動して両サイトを今すぐ巡回（1〜2分）"):
             with st.spinner("GitHub Actions にスクレイピング開始を要請中..."):
                 ok, msg = trigger_github_workflow(token=gh_token, repo=gh_repo)
@@ -867,7 +884,6 @@ def main():
             limit_str = f"D-{r['limit_days_int']}" if r["limit_days_int"] is not None else "―"
             p_yen = int(r["funds_yen"]) if r["funds_yen"] < 99999990 else None
 
-            # 人間の判断動線に沿った集中配置：
             # [監視] [コード] [銘柄名] -> [優待内容] [優待額] [必要資金] -> [意思決定] [SBI急変] -> [各社残数] -> [純利益] [期限]
             display_rows.append({
                 "監視": bool(r.get("watch", False)),
@@ -898,7 +914,7 @@ def main():
                 hide_index=True,
                 height=560,
                 column_config={
-                    "監視": st.column_config.CheckboxColumn("監視", help="クリックで即座に監視リストへ保存", width="small"),
+                    "監視": st.column_config.CheckboxColumn("監視", help="クリックで即座にスプレッドシートへ永久保存", width="small"),
                     "コード": st.column_config.TextColumn("コード", width="small", disabled=True),
                     "銘柄名": st.column_config.TextColumn("銘柄名", width="medium", disabled=True),
                     # ★優待情報集中エリア（左側）
@@ -923,7 +939,7 @@ def main():
                 disabled=[col for col in df_table.columns if col != "監視"]
             )
 
-            # 差分1行のみ即座に保存・同期（0.05秒フリーズ完全根絶）
+            # 【重要】差分検知時に st.rerun() を呼ばず、同期も非同期バックグラウンド処理にして連続クリックを完全保証！
             diff_mask = (edited_table["監視"] != df_table["監視"])
             diff_rows = edited_table[diff_mask]
 
@@ -936,12 +952,12 @@ def main():
                     elif not w and c in st.session_state["watchlist"]:
                         st.session_state["watchlist"].remove(c)
 
+                    # Googleスプレッドシートへ非同期で静かに送信（画面を一切止めない）
                     if gas_api_url:
-                        sync_single_to_google_sheet(gas_api_url, c, w)
+                        sync_to_google_sheet_async(gas_api_url, c, w)
 
                 save_watchlist(st.session_state["watchlist"])
-                st.toast("✅ 監視リストを更新しました！")
-                st.rerun()
+                # ※ここで強制再描画(st.rerun)やトーストを出さないことで、次々と連続でチェックを入れられます！
 
             # ----------------------------------------------------
             # 選択銘柄の超詳細インスペクター
@@ -1026,3 +1042,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
