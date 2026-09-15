@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 app.py - 株主優待クロス在庫トラッカー ＆ 実戦意思決定ダッシュボード
-【UI/UX抜本的改善版】
-- 視線動線の最適化：優待内容・優待価値・取得資金を左側に集約
-- 残数集中表示：日興・前日比・SBI・楽天・カブ・GMOを一箇所に完全統合
-- 最左列での「監視」チェックボックス直接操作（0.05秒フリーズゼロ保存）
-- 選択銘柄の全社在庫時系列インスペクター新設
+【GitHub Actions 1クリック即時スクレイピング ＆ 優待・残数集中レイアウト完全統合版】
+- 🚀 GITHUB_TOKEN による画面からの完全オンデマンド・スクレイピング起動
+- 🎁 優待内容・優待額・取得資金の左側集中配置
+- 📊 証券各社（日興・前日比・SBI・楽天・カブ・GMO）残数の1箇所集中集約
+- ⚡ 最左列の監視チェックボックス直接操作（0.05秒高速保存・フリーズゼロ）
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import pandas as pd
 import streamlit as st
 
 # ============================================================
-# 1. ページ設定 & 超高密度 FinTech CSS
+# 1. ページ初期設定 & 超高密度CSS
 # ============================================================
 st.set_page_config(
     page_title="優待クロス在庫トラッカー",
@@ -117,6 +117,16 @@ html, body, [class*="css"] {
     font-size: 11.5px;
 }
 
+.alert-banner-info {
+    background: #0c4a6e;
+    border: 1px solid #0284c7;
+    color: #e0f2fe;
+    padding: 0.4rem 0.8rem;
+    border-radius: 6px;
+    margin-bottom: 0.35rem;
+    font-size: 12px;
+}
+
 .kpi-row {
     display: flex;
     gap: 0.35rem;
@@ -201,7 +211,7 @@ DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v4.0 (UX Concentrated Edition)"
+APP_VERSION = "v5.0 (On-Demand Dispatch & Concentrated UX)"
 
 # ============================================================
 # 3. 堅牢なフォーマッター
@@ -259,7 +269,69 @@ def fmt_signal(v: Any) -> str:
     return s
 
 # ============================================================
-# 4. ウォッチリスト管理 & GASリアルタイム単一行同期
+# 4. GitHub Actions 1クリック起動エンジン
+# ============================================================
+def trigger_github_workflow(token: str, repo: str, ref: str = "main") -> Tuple[bool, str]:
+    """GitHub API を叩いて、クラウド上で本物のスクレイピングを実行させる"""
+    if not token or not repo:
+        return False, "GITHUB_TOKEN または GITHUB_REPO が Streamlit Secrets に未設定です。"
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "Streamlit-Yutai-Dashboard"
+    }
+
+    # 1. ワークフロー一覧を取得して対象を探す
+    url_list = f"https://api.github.com/repos/{repo}/actions/workflows"
+    req_list = urllib.request.Request(url_list, headers=headers)
+    try:
+        with urllib.request.urlopen(req_list, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            workflows = data.get("workflows", [])
+    except urllib.error.HTTPError as e:
+        return False, f"GitHub認証エラー ({e.code}): トークン権限（repo, workflow）を確認してください。"
+    except Exception as e:
+        return False, f"通信エラー: {e}"
+
+    if not workflows:
+        return False, "リポジトリ内に実行可能なワークフローが見つかりません。"
+
+    # スクレイピング用ワークフローを特定
+    target_wf = None
+    for wf in workflows:
+        path = wf.get("path", "").lower()
+        name = wf.get("name", "").lower()
+        if any(k in path or k in name for k in ["scrape", "stock", "daily", "inventory", "main"]):
+            target_wf = wf
+            break
+    if not target_wf:
+        target_wf = workflows[0]
+
+    wf_id = target_wf.get("id")
+    wf_name = target_wf.get("name", "Scraper")
+
+    # 2. workflow_dispatch を送信
+    url_dispatch = f"https://api.github.com/repos/{repo}/actions/workflows/{wf_id}/dispatches"
+    payload = json.dumps({"ref": ref}).encode("utf-8")
+    req_dispatch = urllib.request.Request(
+        url_dispatch,
+        data=payload,
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req_dispatch, timeout=6) as resp:
+            if resp.status in (204, 200, 201):
+                return True, f"「{wf_name}」を起動しました！ クラウド上で巡回スクレイピングを開始します。"
+            return False, f"起動ステータス: {resp.status}"
+    except urllib.error.HTTPError as e:
+        return False, f"ディスパッチ失敗 ({e.code}): ymlファイルに `on: workflow_dispatch` が記述されているか確認してください。"
+    except Exception as e:
+        return False, f"送信エラー: {e}"
+
+# ============================================================
+# 5. ウォッチリスト管理 & GASリアルタイム単一行同期
 # ============================================================
 def load_watchlist() -> List[str]:
     if WATCHLIST_FILE.exists():
@@ -276,7 +348,6 @@ def save_watchlist(codes: List[str]):
     WATCHLIST_FILE.write_text(json.dumps(clean_codes, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def sync_single_to_google_sheet(gas_url: str, code: str, watch: bool, status: str = "未確保") -> bool:
-    """変更があった1銘柄のみを0.1秒で即時同期（フリーズ完全防止）"""
     if not gas_url or not gas_url.startswith("https://script.google.com"): return False
     try:
         payload = json.dumps({"code": code, "watch": watch, "status": status}).encode("utf-8")
@@ -289,7 +360,7 @@ def sync_single_to_google_sheet(gas_url: str, code: str, watch: bool, status: st
         return False
 
 # ============================================================
-# 5. データローダー（Google Sheets ＆ ローカルCSV 完全統合）
+# 6. データローダー（Google Sheets ＆ ローカルCSV 完全統合）
 # ============================================================
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_sheet_csv(sheet_name: str, spreadsheet_id: str = DEFAULT_SPREADSHEET_ID) -> Optional[pd.DataFrame]:
@@ -396,7 +467,7 @@ def normalize_master(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 # ============================================================
-# 6. 分析・シグナル算出エンジン
+# 7. 分析・シグナル算出エンジン
 # ============================================================
 def analyze_stocks(
     df_hist: pd.DataFrame,
@@ -565,11 +636,15 @@ def analyze_stocks(
     return df_res, stats, all_timestamps
 
 # ============================================================
-# 7. メインUI
+# 8. メインUI
 # ============================================================
 def main():
     if "watchlist" not in st.session_state:
         st.session_state["watchlist"] = load_watchlist()
+
+    # Secrets から GitHub 設定を安全に読込
+    gh_token = st.secrets.get("GITHUB_TOKEN", "")
+    gh_repo = st.secrets.get("GITHUB_REPO", "tekkame/yutai-cross-dashboard")
 
     # サイドバー
     with st.sidebar:
@@ -578,13 +653,14 @@ def main():
         gas_api_url = st.text_input("GAS WebApp同期URL", value=DEFAULT_GAS_API_URL)
         nikko_th = st.number_input("日興 警戒閾値 (株)", min_value=1000, max_value=100000, value=10000, step=1000)
         annual_rate = st.number_input("貸株年率 (日興=1.4%)", min_value=0.001, max_value=0.05, value=0.014, step=0.001, format="%.3f")
+        st.caption(f"GitHub: `{gh_repo}` ({'認証設定済 ✅' if gh_token else 'Token未設定 ⚠️'})")
         st.caption(f"Yutai Cross {APP_VERSION}")
 
     # データ読み込み
     raw_hist, raw_mast, data_source_msg = load_all_combined_data(spreadsheet_id=sheet_id)
     if raw_hist is None or raw_hist.empty:
-        st.warning("⚠️ 在庫データがありません。スプレッドシートIDを確認するか、手動更新を実行してください。")
-        if st.button("🔄 最新データ再読込", use_container_width=True):
+        st.warning("⚠️ 在庫データがありません。スプレッドシートIDを確認するか、右上の「🔄 画面再読込」を実行してください。")
+        if st.button("🔄 画面再読込", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
         return
@@ -671,8 +747,8 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # 4. クイック操作＆検索＆手動更新バー
-    c_f1, c_f2, c_f3, c_f4, c_f5, c_f6 = st.columns([2.2, 1.6, 1.0, 1.0, 1.8, 1.2])
+    # 4. 操作＆スクレイピング起動バー
+    c_f1, c_f2, c_f3, c_f4, c_f5, c_f6, c_f7 = st.columns([2.0, 1.4, 0.9, 0.9, 1.6, 1.1, 1.5])
     with c_f1:
         query = st.text_input("検索", placeholder="🔍 コード・銘柄名・優待内容 (例: 3167, ヤマダ, ギフト)", label_visibility="collapsed")
     with c_f2:
@@ -702,10 +778,30 @@ def main():
             label_visibility="collapsed"
         )
     with c_f6:
-        if st.button("🔄 手動更新(再読込)", use_container_width=True):
+        if st.button("🔄 画面再読込", use_container_width=True, help="最新のCSV/スプレッドシートデータを画面に反映（0.5秒）"):
             st.cache_data.clear()
-            st.toast("⚡ 最新データを再取得・再読込しました！")
+            st.toast("⚡ 最新データを画面に反映しました！")
             st.rerun()
+    with c_f7:
+        # 【新機能】GitHub Actions を1クリックで即時起動させるボタン
+        if st.button("🚀 最新スクレイピング", use_container_width=True, help="クラウドサーバーを起動して両サイトを今すぐ巡回（1〜2分）"):
+            with st.spinner("GitHub Actions にスクレイピング開始を要請中..."):
+                ok, msg = trigger_github_workflow(token=gh_token, repo=gh_repo)
+            if ok:
+                st.session_state["dispatch_msg"] = msg
+                st.rerun()
+            else:
+                st.error(msg)
+
+    # スクレイピング起動中の案内バナー
+    if "dispatch_msg" in st.session_state:
+        st.markdown(f"""
+        <div class="alert-banner-info">
+            <span>🚀 <b>{st.session_state['dispatch_msg']}</b><br>
+            👉 <a href="https://github.com/{gh_repo}/actions" target="_blank" style="color: #67e8f9; text-decoration: underline; font-weight: bold;">ここをクリックして GitHub Actions の進行状況を確認する</a><br>
+            ※巡回（約1〜2分）が完了したら、左隣の「🔄 画面再読込」ボタンを押してください。</span>
+        </div>
+        """, unsafe_allow_html=True)
 
     # フィルタリング
     filtered_df = df_analyzed.copy()
@@ -753,11 +849,11 @@ def main():
     tab1, tab2, tab3 = st.tabs([
         f"⚡ 実戦ボード ({len(filtered_df)}件)",
         f"📊 日時別 在庫時系列 (全{len(all_timestamps)}回分)",
-        "💡 運用ガイド ＆ GitHub連携"
+        "💡 運用ガイド ＆ 自動実行"
     ])
 
     # ----------------------------------------------------
-    # TAB 1: 実戦ボード (優待＆残数を徹底集中配置)
+    # TAB 1: 実戦ボード (優待情報 ＆ 各社残数を完全集中配置)
     # ----------------------------------------------------
     with tab1:
         display_rows = []
@@ -771,27 +867,23 @@ def main():
             limit_str = f"D-{r['limit_days_int']}" if r["limit_days_int"] is not None else "―"
             p_yen = int(r["funds_yen"]) if r["funds_yen"] < 99999990 else None
 
-            # 【集中レイアウト】目線の流れに沿って列を完全に集中配置！
+            # 人間の判断動線に沿った集中配置：
+            # [監視] [コード] [銘柄名] -> [優待内容] [優待額] [必要資金] -> [意思決定] [SBI急変] -> [各社残数] -> [純利益] [期限]
             display_rows.append({
-                # 1. 監視・銘柄
                 "監視": bool(r.get("watch", False)),
                 "コード": str(r.get("code", "")),
                 "銘柄名": str(r.get("name", "")),
-                # 2. ★優待情報集中エリア (左側に配置！)
                 "優待内容": str(r.get("yutai_content", "")[:32]),
                 "優待価値": r.get("yutai_value"),
                 "取得資金": p_yen,
-                # 3. 意思決定・アラート
                 "意思決定": str(r.get("signal", "")),
                 "SBI急変": str(r.get("sbi_change", "―")),
-                # 4. ★残数集中エリア (全社在庫を1箇所に集約！)
                 "日興": fmt_qty(r.get("nikko_now")),
                 "前日比": diff_str,
                 "SBI": str(r.get("sbi_now", "―")),
                 "楽天": fmt_qty(r.get("rakuten_now")),
                 "カブ": fmt_qty(r.get("kabu_now")),
                 "GMO": str(r.get("gmo_now", "―")),
-                # 5. 収支・期限
                 "実質純利益": r.get("net_profit"),
                 "限界日": limit_str,
                 "利回り": f"{r['yield_pct']:.1f}%" if r.get("yield_pct") is not None else "―",
@@ -806,25 +898,24 @@ def main():
                 hide_index=True,
                 height=560,
                 column_config={
-                    # 1. 監視・銘柄
                     "監視": st.column_config.CheckboxColumn("監視", help="クリックで即座に監視リストへ保存", width="small"),
                     "コード": st.column_config.TextColumn("コード", width="small", disabled=True),
                     "銘柄名": st.column_config.TextColumn("銘柄名", width="medium", disabled=True),
-                    # 2. 優待情報集中エリア
+                    # ★優待情報集中エリア（左側）
                     "優待内容": st.column_config.TextColumn("🎁 優待内容", width="large", disabled=True, help="株主優待の品目・内容"),
                     "優待価値": st.column_config.NumberColumn("優待額", format="¥%,d", width="small", disabled=True),
                     "取得資金": st.column_config.NumberColumn("必要資金", format="¥%,d", width="medium", disabled=True),
-                    # 3. 意思決定・アラート
+                    # 意思決定
                     "意思決定": st.column_config.TextColumn("意思決定", width="small", disabled=True),
                     "SBI急変": st.column_config.TextColumn("SBI急変", width="small", disabled=True),
-                    # 4. 残数集中エリア
+                    # ★各社残数集中エリア（中央）
                     "日興": st.column_config.TextColumn("日興在庫", width="small", disabled=True),
                     "前日比": st.column_config.TextColumn("前日比", width="small", disabled=True),
                     "SBI": st.column_config.TextColumn("SBI", width="small", disabled=True),
                     "楽天": st.column_config.TextColumn("楽天", width="small", disabled=True),
                     "カブ": st.column_config.TextColumn("カブ", width="small", disabled=True),
                     "GMO": st.column_config.TextColumn("GMO", width="small", disabled=True),
-                    # 5. 収支・期限
+                    # 収支・期限（右側）
                     "実質純利益": st.column_config.NumberColumn("純利益", format="¥%,d", width="small", disabled=True),
                     "限界日": st.column_config.TextColumn("限界日", width="small", disabled=True),
                     "利回り": st.column_config.TextColumn("利回り", width="small", disabled=True),
@@ -853,13 +944,13 @@ def main():
                 st.rerun()
 
             # ----------------------------------------------------
-            # 【新機能】選択銘柄の超詳細インスペクター
+            # 選択銘柄の超詳細インスペクター
             # ----------------------------------------------------
             st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
-            insp_c1, insp_c2 = st.columns([3.5, 6.5])
+            insp_c1, insp_c2 = st.columns([3.8, 6.2])
             with insp_c1:
                 sel_code = st.selectbox(
-                    "🔍 銘柄詳細インスペクター（選択すると全社推移を表示）",
+                    "🔍 銘柄詳細インスペクター（選択すると全社在庫推移を表示）",
                     options=filtered_df["code"].tolist(),
                     format_func=lambda c: f"{c} {filtered_df[filtered_df['code']==c]['name'].values[0]}"
                 )
@@ -869,7 +960,7 @@ def main():
                     **【{sel_r['code']} {sel_r['name']}】**
                     * **優待内容**: `{sel_r['yutai_content']}`
                     * **優待価値**: ¥{sel_r['yutai_value']:,}相当 ｜ **必要資金**: ¥{sel_r['funds_yen']:,} ｜ **利回り**: {sel_r['yield_pct']}%
-                    * **手残り純利益**: ¥{sel_r['net_profit']:,} (貸株年率1.4%試算、限界日: D-{sel_r['limit_days_int']})
+                    * **手残り純利益**: ¥{sel_r['net_profit']:,} (限界日: D-{sel_r['limit_days_int']})
                     """)
             with insp_c2:
                 if sel_code:
@@ -918,18 +1009,19 @@ def main():
             st.info("過去の時系列ログがまだ十分に蓄積されていません。")
 
     # ----------------------------------------------------
-    # TAB 3: 運用ガイド ＆ GitHub連携
+    # TAB 3: 運用ガイド ＆ 自動実行
     # ----------------------------------------------------
     with tab3:
         st.markdown(f"""
-        ### ⚡ 運用 ＆ 最新データ同期について
+        ### ⚡ 運用 ＆ オンデマンド実行の仕組み
 
-        1. **定期自動更新（GitHub Actions）**:
-           - 平日毎日 **17:00** および **20:00**（JST）に GitHub Actions が最新の在庫スクレイピングを自動実行し、リポジトリと Google スプレッドシートを更新します。
-        2. **手動更新**:
-           - 上部の **「🔄 手動更新(再読込)」** ボタンを押すと、キャッシュを即座に破棄して Google スプレッドシートおよび最新CSVのデータをリアルタイムに再読込します。
-        3. **今すぐスクレイピングを実行したい場合**:
-           - GitHub Actions の画面（[Actions 実行画面](https://github.com/tekkame/yutai-cross-dashboard/actions)）から **「Run workflow」** をクリックすると、クラウド上で今すぐ即時スクレイピングが実行されます。
+        1. **「🚀 最新スクレイピング」ボタン（画面右上）**:
+           - 押すと GitHub Actions の API を叩き、Microsoft/GitHub のサーバー上で両サイトの巡回（約1〜2分）が開始されます。
+           - Streamlit Cloud のスリープ状態に一切邪魔されず、完全に独立して最新化されます。
+        2. **定期自動更新（完全放置運用）**:
+           - 平日毎日 **17:00** および **20:00**（JST）に GitHub Actions が自動起動し、最新在庫を追記します。
+        3. **「🔄 画面再読込」ボタン**:
+           - 巡回完了後、このボタンを押すだけで最新データが画面に即時反映されます。
         """)
 
 if __name__ == "__main__":
