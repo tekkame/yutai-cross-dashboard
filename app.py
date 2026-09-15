@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-app.py - 株主優待クロス在庫トラッカー ＆ 実戦意思決定ダッシュボード (完全改善版)
-- 【完全復活】表の先頭列に直接ON/OFFできる「監視」チェックボックス
-- 【フリーズゼロ】変更があった行（1行）のみを0.05秒で高速保存
-- 【手動更新の完全修復】Googleスプレッドシート ＆ ローカルCSVのデュアル即時再読込
-- 【金額順完全ソート】デフォルトで「取得参考価格が安い順 (5万→10万→20万...)」
-- 【プロ仕様】カンマ区切り通貨フォーマット (¥%,d) ＆ 整数限界日 (D-11)
+app.py - 株主優待クロス在庫トラッカー ＆ 実戦意思決定ダッシュボード
+【UI/UX抜本的改善版】
+- 視線動線の最適化：優待内容・優待価値・取得資金を左側に集約
+- 残数集中表示：日興・前日比・SBI・楽天・カブ・GMOを一箇所に完全統合
+- 最左列での「監視」チェックボックス直接操作（0.05秒フリーズゼロ保存）
+- 選択銘柄の全社在庫時系列インスペクター新設
 """
 
 from __future__ import annotations
@@ -15,8 +15,6 @@ import io
 import json
 import os
 import re
-import subprocess
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,7 +27,7 @@ import pandas as pd
 import streamlit as st
 
 # ============================================================
-# 1. ページ初期設定 & 超高密度CSS
+# 1. ページ設定 & 超高密度 FinTech CSS
 # ============================================================
 st.set_page_config(
     page_title="優待クロス在庫トラッカー",
@@ -203,7 +201,7 @@ DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v3.0 (Interactive Checkbox & Dual Realtime Sync)"
+APP_VERSION = "v4.0 (UX Concentrated Edition)"
 
 # ============================================================
 # 3. 堅牢なフォーマッター
@@ -278,7 +276,7 @@ def save_watchlist(codes: List[str]):
     WATCHLIST_FILE.write_text(json.dumps(clean_codes, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def sync_single_to_google_sheet(gas_url: str, code: str, watch: bool, status: str = "未確保") -> bool:
-    """変更があった1銘柄のみを0.1秒で即時同期（タイムアウト1.5秒でフリーズ完全防止）"""
+    """変更があった1銘柄のみを0.1秒で即時同期（フリーズ完全防止）"""
     if not gas_url or not gas_url.startswith("https://script.google.com"): return False
     try:
         payload = json.dumps({"code": code, "watch": watch, "status": status}).encode("utf-8")
@@ -295,7 +293,6 @@ def sync_single_to_google_sheet(gas_url: str, code: str, watch: bool, status: st
 # ============================================================
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_sheet_csv(sheet_name: str, spreadsheet_id: str = DEFAULT_SPREADSHEET_ID) -> Optional[pd.DataFrame]:
-    """Googleスプレッドシートから最新CSVをリアルタイム取得"""
     if not spreadsheet_id: return None
     url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq?tqx=out:csv&sheet={urllib.parse.quote(sheet_name)}"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -309,9 +306,8 @@ def fetch_sheet_csv(sheet_name: str, spreadsheet_id: str = DEFAULT_SPREADSHEET_I
 def load_all_combined_data(spreadsheet_id: str = DEFAULT_SPREADSHEET_ID) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
     hist_dfs = []
     latest_master = pd.DataFrame()
-    data_source_msg = "ローカルキャッシュ"
+    data_source_msg = "ローカルCSV"
 
-    # 1. ローカル data/ フォルダから履歴CSVを探索
     if DATA_DIR.exists():
         h_files = sorted([DATA_DIR / f for f in os.listdir(DATA_DIR) if f.startswith("history_") and f.endswith(".csv")])
         for hf in h_files:
@@ -325,11 +321,10 @@ def load_all_combined_data(spreadsheet_id: str = DEFAULT_SPREADSHEET_ID) -> Tupl
             try: latest_master = pd.read_csv(m_files[0])
             except Exception: pass
 
-    # 2. Googleスプレッドシートからも最新履歴・マスターを同時取得
     sheet_hist = fetch_sheet_csv("raw_history", spreadsheet_id=spreadsheet_id)
     if sheet_hist is not None and not sheet_hist.empty:
         hist_dfs.append(sheet_hist)
-        data_source_msg = "Googleスプレッドシート連携"
+        data_source_msg = "Googleスプレッドシート連携中"
 
     sheet_mast = fetch_sheet_csv("master_list", spreadsheet_id=spreadsheet_id)
     if sheet_mast is not None and not sheet_mast.empty:
@@ -448,11 +443,10 @@ def analyze_stocks(
         sbi_prev_raw = str(prev_row.get("rtn_sbi") or prev_row.get("sbi") or "―").strip() if prev_row is not None else "―"
         sbi_prev = fmt_signal(sbi_prev_raw)
 
-        # 1. 日興前日比
+        # 日興前日比
         nikko_diff = (nikko_now - nikko_prev) if (nikko_now is not None and nikko_prev is not None) else None
-        nikko_trend_str = f"{fmt_qty(nikko_prev)} → {fmt_qty(nikko_now)}" if prev_ts else fmt_qty(nikko_now)
 
-        # 2. SBI急変検知
+        # SBI急変検知
         is_sbi_sudden_drop = False
         if prev_ts and sbi_prev != "―" and sbi_now != "―":
             if sbi_prev == "◎" and sbi_now == "▲":
@@ -468,7 +462,7 @@ def analyze_stocks(
         else:
             sbi_change = sbi_now if sbi_now != "―" else "―"
 
-        # 3. 補充検知
+        # 補充検知
         is_refill = False
         if prev_ts:
             was_zero = (nikko_prev is not None and nikko_prev == 0) or (rakuten_prev is not None and rakuten_prev == 0)
@@ -476,11 +470,10 @@ def analyze_stocks(
             if was_zero and now_has:
                 is_refill = True
 
-        # 4. 合計在庫
         valid_qtys = [q for q in [nikko_now, rakuten_now, kabu_now] if q is not None]
         total_qty = sum(valid_qtys) if valid_qtys else None
 
-        # 5. シグナル判定
+        # シグナル判定
         if is_sbi_sudden_drop and (nikko_now is not None and nikko_now <= nikko_th):
             signal = "🔴 今夜確保"
             signal_rank = 1
@@ -500,11 +493,9 @@ def analyze_stocks(
             signal = "⚪ 枯渇" if (total_qty == 0) else "🟡 要監視"
             signal_rank = 3
 
-        # 6. コスト & 実質純利益 & 限界日
+        # 優待情報・コスト算出
         yutai_val = to_float(m_row.get("yutai_value") or row.get("yutai_value"))
         funds_man = to_float(m_row.get("funds_man") or row.get("funds_man"))
-
-        # 取得参考価格 (円単位の純粋な整数)
         funds_yen = int(round(funds_man * 10000)) if funds_man is not None and funds_man > 0 else 99999999
 
         days_left_raw = str(row.get("days_left") or "10").replace("D-", "")
@@ -544,7 +535,6 @@ def analyze_stocks(
             "is_refill": is_refill,
             "nikko_now": nikko_now,
             "nikko_diff": nikko_diff,
-            "nikko_trend_str": nikko_trend_str,
             "rakuten_now": rakuten_now,
             "kabu_now": kabu_now,
             "sbi_now": sbi_now,
@@ -590,7 +580,7 @@ def main():
         annual_rate = st.number_input("貸株年率 (日興=1.4%)", min_value=0.001, max_value=0.05, value=0.014, step=0.001, format="%.3f")
         st.caption(f"Yutai Cross {APP_VERSION}")
 
-    # データ読み込み（Google Sheets ＆ ローカル data/ 自動両面読込）
+    # データ読み込み
     raw_hist, raw_mast, data_source_msg = load_all_combined_data(spreadsheet_id=sheet_id)
     if raw_hist is None or raw_hist.empty:
         st.warning("⚠️ 在庫データがありません。スプレッドシートIDを確認するか、手動更新を実行してください。")
@@ -624,7 +614,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # 2. 緊急アラートバナー
+    # 2. 緊急アラート速報バナー
     tonight_df = df_analyzed[df_analyzed["signal"] == "🔴 今夜確保"]
     sbi_drop_df = df_analyzed[df_analyzed["is_sbi_drop"] == True]
 
@@ -681,8 +671,8 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # 4. 検索＆フィルタリング＆手動更新バー
-    c_f1, c_f2, c_f3, c_f4, c_f5, c_f6 = st.columns([2.2, 1.6, 1.2, 1.0, 1.8, 1.2])
+    # 4. クイック操作＆検索＆手動更新バー
+    c_f1, c_f2, c_f3, c_f4, c_f5, c_f6 = st.columns([2.2, 1.6, 1.0, 1.0, 1.8, 1.2])
     with c_f1:
         query = st.text_input("検索", placeholder="🔍 コード・銘柄名・優待内容 (例: 3167, ヤマダ, ギフト)", label_visibility="collapsed")
     with c_f2:
@@ -694,16 +684,15 @@ def main():
             label_visibility="collapsed"
         )
     with c_f3:
-        only_watch = st.checkbox("⭐ 監視中のみ", value=False)
+        only_watch = st.checkbox("⭐ 監視のみ", value=False)
     with c_f4:
         only_nikko = st.checkbox("日興あり", value=False)
     with c_f5:
-        # ご要望の「取得参考価格が安い順」をデフォルト初期選択！
         sort_mode = st.selectbox(
             "並び替え",
             options=[
-                "💴 取得参考価格が安い順 (〜10万, 20万...)",
-                "💰 取得参考価格が高い順",
+                "💴 取得資金が安い順 (〜10万, 20万...)",
+                "💰 取得資金が高い順",
                 "⚡ シグナル優先 (今夜確保→急変)",
                 "🎁 実質純利益が高い順",
                 "📈 利回りが高い順",
@@ -713,7 +702,6 @@ def main():
             label_visibility="collapsed"
         )
     with c_f6:
-        # 【完全修復】手動更新ボタン：キャッシュをクリアし、即座にGoogle Sheetsとローカルを再読込！
         if st.button("🔄 手動更新(再読込)", use_container_width=True):
             st.cache_data.clear()
             st.toast("⚡ 最新データを再取得・再読込しました！")
@@ -747,10 +735,10 @@ def main():
             filtered_df["yutai_content"].astype(str).str.lower().str.contains(q)
         ]
 
-    # 純粋な数値ソート
-    if "取得参考価格が安い順" in sort_mode:
+    # ソート順
+    if "取得資金が安い順" in sort_mode:
         filtered_df = filtered_df.sort_values(by="funds_yen", ascending=True)
-    elif "取得参考価格が高い順" in sort_mode:
+    elif "取得資金が高い順" in sort_mode:
         filtered_df = filtered_df.sort_values(by="funds_yen", ascending=False)
     elif "実質純利益が高い順" in sort_mode:
         filtered_df = filtered_df.sort_values(by="net_profit", ascending=False, na_position="last")
@@ -769,7 +757,7 @@ def main():
     ])
 
     # ----------------------------------------------------
-    # TAB 1: 実戦ボード (先頭列にチェックボックス完全復活！)
+    # TAB 1: 実戦ボード (優待＆残数を徹底集中配置)
     # ----------------------------------------------------
     with tab1:
         display_rows = []
@@ -783,60 +771,68 @@ def main():
             limit_str = f"D-{r['limit_days_int']}" if r["limit_days_int"] is not None else "―"
             p_yen = int(r["funds_yen"]) if r["funds_yen"] < 99999990 else None
 
+            # 【集中レイアウト】目線の流れに沿って列を完全に集中配置！
             display_rows.append({
-                "監視": bool(r.get("watch", False)),          # チェックボックス列
+                # 1. 監視・銘柄
+                "監視": bool(r.get("watch", False)),
                 "コード": str(r.get("code", "")),
                 "銘柄名": str(r.get("name", "")),
-                "取得最低価格": p_yen,                         # 数値型 (¥%,d)
-                "優待価値": r.get("yutai_value"),              # 数値型 (¥%,d)
-                "純利益": r.get("net_profit"),                # 数値型 (¥%,d)
+                # 2. ★優待情報集中エリア (左側に配置！)
+                "優待内容": str(r.get("yutai_content", "")[:32]),
+                "優待価値": r.get("yutai_value"),
+                "取得資金": p_yen,
+                # 3. 意思決定・アラート
                 "意思決定": str(r.get("signal", "")),
-                "SBI変化": str(r.get("sbi_change", "―")),
-                "日興最新": fmt_qty(r.get("nikko_now")),
+                "SBI急変": str(r.get("sbi_change", "―")),
+                # 4. ★残数集中エリア (全社在庫を1箇所に集約！)
+                "日興": fmt_qty(r.get("nikko_now")),
                 "前日比": diff_str,
-                "日興推移": r.get("nikko_trend_str", "―"),
-                "カブ": fmt_qty(r.get("kabu_now")),
-                "楽天": fmt_qty(r.get("rakuten_now")),
                 "SBI": str(r.get("sbi_now", "―")),
+                "楽天": fmt_qty(r.get("rakuten_now")),
+                "カブ": fmt_qty(r.get("kabu_now")),
                 "GMO": str(r.get("gmo_now", "―")),
+                # 5. 収支・期限
+                "実質純利益": r.get("net_profit"),
                 "限界日": limit_str,
                 "利回り": f"{r['yield_pct']:.1f}%" if r.get("yield_pct") is not None else "―",
-                "優待内容": str(r.get("yutai_content", "")[:35]),
             })
 
         df_table = pd.DataFrame(display_rows)
 
         if not df_table.empty:
-            # 【完全復活】監視チェックボックスを直接編集できる data_editor
             edited_table = st.data_editor(
                 df_table,
                 use_container_width=True,
                 hide_index=True,
-                height=600,
+                height=560,
                 column_config={
-                    "監視": st.column_config.CheckboxColumn("監視", help="チェックすると監視リストに即座に保存されます", width="small"),
+                    # 1. 監視・銘柄
+                    "監視": st.column_config.CheckboxColumn("監視", help="クリックで即座に監視リストへ保存", width="small"),
                     "コード": st.column_config.TextColumn("コード", width="small", disabled=True),
                     "銘柄名": st.column_config.TextColumn("銘柄名", width="medium", disabled=True),
-                    "取得最低価格": st.column_config.NumberColumn("取得最低価格", format="¥%,d", width="medium", disabled=True),
-                    "優待価値": st.column_config.NumberColumn("優待(円)", format="¥%,d", width="small", disabled=True),
-                    "純利益": st.column_config.NumberColumn("実質純利益", format="¥%,d", width="small", disabled=True),
+                    # 2. 優待情報集中エリア
+                    "優待内容": st.column_config.TextColumn("🎁 優待内容", width="large", disabled=True, help="株主優待の品目・内容"),
+                    "優待価値": st.column_config.NumberColumn("優待額", format="¥%,d", width="small", disabled=True),
+                    "取得資金": st.column_config.NumberColumn("必要資金", format="¥%,d", width="medium", disabled=True),
+                    # 3. 意思決定・アラート
                     "意思決定": st.column_config.TextColumn("意思決定", width="small", disabled=True),
-                    "SBI変化": st.column_config.TextColumn("SBI変化", width="medium", disabled=True),
-                    "日興最新": st.column_config.TextColumn("日興最新", width="small", disabled=True),
+                    "SBI急変": st.column_config.TextColumn("SBI急変", width="small", disabled=True),
+                    # 4. 残数集中エリア
+                    "日興": st.column_config.TextColumn("日興在庫", width="small", disabled=True),
                     "前日比": st.column_config.TextColumn("前日比", width="small", disabled=True),
-                    "日興推移": st.column_config.TextColumn("日興推移", width="medium", disabled=True),
-                    "カブ": st.column_config.TextColumn("カブ", width="small", disabled=True),
-                    "楽天": st.column_config.TextColumn("楽天", width="small", disabled=True),
                     "SBI": st.column_config.TextColumn("SBI", width="small", disabled=True),
+                    "楽天": st.column_config.TextColumn("楽天", width="small", disabled=True),
+                    "カブ": st.column_config.TextColumn("カブ", width="small", disabled=True),
                     "GMO": st.column_config.TextColumn("GMO", width="small", disabled=True),
+                    # 5. 収支・期限
+                    "実質純利益": st.column_config.NumberColumn("純利益", format="¥%,d", width="small", disabled=True),
                     "限界日": st.column_config.TextColumn("限界日", width="small", disabled=True),
                     "利回り": st.column_config.TextColumn("利回り", width="small", disabled=True),
-                    "優待内容": st.column_config.TextColumn("優待内容", width="large", disabled=True),
                 },
                 disabled=[col for col in df_table.columns if col != "監視"]
             )
 
-            # 【高速・フリーズゼロ】変更があった行（差分1行）だけを抽出して即座に保存！
+            # 差分1行のみ即座に保存・同期（0.05秒フリーズ完全根絶）
             diff_mask = (edited_table["監視"] != df_table["監視"])
             diff_rows = edited_table[diff_mask]
 
@@ -849,15 +845,43 @@ def main():
                     elif not w and c in st.session_state["watchlist"]:
                         st.session_state["watchlist"].remove(c)
 
-                    # GASへのリアルタイム通信も変更された1行のみ（1秒未満）
                     if gas_api_url:
                         sync_single_to_google_sheet(gas_api_url, c, w)
 
                 save_watchlist(st.session_state["watchlist"])
                 st.toast("✅ 監視リストを更新しました！")
                 st.rerun()
+
+            # ----------------------------------------------------
+            # 【新機能】選択銘柄の超詳細インスペクター
+            # ----------------------------------------------------
+            st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
+            insp_c1, insp_c2 = st.columns([3.5, 6.5])
+            with insp_c1:
+                sel_code = st.selectbox(
+                    "🔍 銘柄詳細インスペクター（選択すると全社推移を表示）",
+                    options=filtered_df["code"].tolist(),
+                    format_func=lambda c: f"{c} {filtered_df[filtered_df['code']==c]['name'].values[0]}"
+                )
+                if sel_code:
+                    sel_r = filtered_df[filtered_df["code"] == sel_code].iloc[0]
+                    st.markdown(f"""
+                    **【{sel_r['code']} {sel_r['name']}】**
+                    * **優待内容**: `{sel_r['yutai_content']}`
+                    * **優待価値**: ¥{sel_r['yutai_value']:,}相当 ｜ **必要資金**: ¥{sel_r['funds_yen']:,} ｜ **利回り**: {sel_r['yield_pct']}%
+                    * **手残り純利益**: ¥{sel_r['net_profit']:,} (貸株年率1.4%試算、限界日: D-{sel_r['limit_days_int']})
+                    """)
+            with insp_c2:
+                if sel_code:
+                    sub_h = df_hist[df_hist["code"] == sel_code].copy()
+                    if not sub_h.empty and "timestamp" in sub_h.columns:
+                        h_disp = sub_h[["timestamp", "nikko", "rakuten", "kabu", "sbi", "gmo"]].copy()
+                        h_disp.columns = ["取得日時", "日興", "楽天", "カブ", "SBI", "GMO"]
+                        for col in ["日興", "楽天", "カブ"]:
+                            h_disp[col] = h_disp[col].apply(fmt_qty)
+                        st.dataframe(h_disp.tail(6), hide_index=True, use_container_width=True, height=135)
         else:
-            st.info("条件に一致する銘柄がありません。フィルタを緩和してください。")
+            st.info("条件に一致する銘柄がありません。")
 
     # ----------------------------------------------------
     # TAB 2: 日時別 在庫時系列 (マトリクス)
