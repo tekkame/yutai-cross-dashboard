@@ -206,7 +206,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v11.0 (Nikko Fee Simulation & Nomura Loan Tracker)"
+APP_VERSION = "v11.1 (Resilient Multi-Layer Sync & Chrono Chart)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -628,9 +628,67 @@ def save_watchlist_to_disk(codes: List[str]):
     clean_codes = sorted(list(set(fmt_code(c) for c in codes if c)))
     WATCHLIST_FILE.write_text(json.dumps(clean_codes, ensure_ascii=False, indent=2), encoding="utf-8")
 
+def fetch_watchlist_from_github(token: str, repo: str) -> Optional[List[str]]:
+    """GitHub API から直接最新の data/watchlist.json を取得（Cloud再起動時のローカルディスク不整合・キャッシュ切れを防止）"""
+    if not repo: return None
+    try:
+        url = f"https://raw.githubusercontent.com/{repo}/main/data/watchlist.json"
+        req = urllib.request.Request(url, headers={"User-Agent": "Streamlit-Yutai-Dashboard"})
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if isinstance(data, list) and data:
+                return [fmt_code(c) for c in data if c]
+    except Exception:
+        pass
+    return None
+
 def load_initial_watchlist(df_mast: Optional[pd.DataFrame] = None) -> List[str]:
-    """監視リストをロード（watchlist.json の内容を絶対正とし、余分な過去フラグは自動混入させない）"""
-    return load_watchlist_from_disk()
+    """監視リストを多層フェイルオーバーで堅牢にロード（Streamlit Cloud再起動時の初期化を完全防止）
+    ① ローカルの data/watchlist.json
+    ② GitHub リポジトリ上の最新 data/watchlist.json
+    ③ Google スプレッドシート（master_list の監視列=TRUE）
+    ④ デフォルト6銘柄
+    """
+    # 1. ローカルディスク確認
+    local_codes = []
+    if WATCHLIST_FILE.exists():
+        try:
+            codes = json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
+            if isinstance(codes, list) and codes:
+                local_codes = [fmt_code(c) for c in codes if c]
+        except Exception:
+            pass
+
+    # ローカルがデフォルト6銘柄と異なりユーザー追加・削除済みなら最優先信頼
+    if local_codes and set(local_codes) != set(DEFAULT_WATCHLIST):
+        return local_codes
+
+    # 2. GitHub リポジトリから直接最新の watchlist.json を取得（Cloudコンテナ再起動対策）
+    gh_token = get_github_token()
+    gh_repo = safe_get_secret("GITHUB_REPO", "tekkame/yutai-cross-dashboard")
+    remote_codes = fetch_watchlist_from_github(gh_token, gh_repo)
+    if remote_codes and set(remote_codes) != set(DEFAULT_WATCHLIST):
+        save_watchlist_to_disk(remote_codes)  # ローカルディスクも同期
+        return remote_codes
+
+    # 3. ローカルに正常なリストがあればそれを採用
+    if local_codes:
+        return local_codes
+
+    # 4. Google スプレッドシートの master_list に監視フラグがある場合のフォールバック
+    if df_mast is not None and not df_mast.empty:
+        for c_col in ["watch", "監視", "監視フラグ", "⭐"]:
+            if c_col in df_mast.columns:
+                sub = df_mast[df_mast[c_col].astype(str).str.lower().isin(["true", "1", "◎", "〇"])]
+                if not sub.empty and "code" in sub.columns:
+                    s_codes = [fmt_code(c) for c in sub["code"].tolist() if c]
+                    if s_codes:
+                        save_watchlist_to_disk(s_codes)
+                        return s_codes
+
+    return DEFAULT_WATCHLIST.copy()
 
 # --- 非同期同期ワーカー (GAS ＆ GitHub API) ---
 def _send_to_gas_worker(gas_url: str, code: str, is_watched: bool):
@@ -645,57 +703,65 @@ def _send_to_gas_worker(gas_url: str, code: str, is_watched: bool):
         pass
 
 def _sync_to_github_worker(token: str, repo: str, content_str: str, commit_msg: str, file_path: str = "data/watchlist.json"):
-    """Streamlit Cloud 上での変更を GitHub リポジトリへ直接コミットして永久保持"""
+    """Streamlit Cloud 上での変更を GitHub リポジトリへ直接コミットして永久保持（競合リトライ付き）"""
     if not token or not repo: return
-    try:
-        url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "Streamlit-Yutai-Dashboard",
-        }
-        sha = None
-        req_get = urllib.request.Request(url, headers=headers)
+    for attempt in range(2):  # 最大2回リトライ（SHA衝突・並行コミット対策）
         try:
-            with urllib.request.urlopen(req_get, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                sha = data.get("sha")
-        except urllib.error.HTTPError as e:
-            if e.code != 404: return
-        except Exception: return
+            url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "Streamlit-Yutai-Dashboard",
+            }
+            sha = None
+            req_get = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(req_get, timeout=5) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    sha = data.get("sha")
+            except urllib.error.HTTPError as e:
+                if e.code != 404: pass
+            except Exception: pass
 
-        b64_content = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
-        payload = {"message": commit_msg, "content": b64_content, "branch": "main"}
-        if sha: payload["sha"] = sha
+            b64_content = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+            payload = {"message": commit_msg, "content": b64_content, "branch": "main"}
+            if sha: payload["sha"] = sha
 
-        req_put = urllib.request.Request(
-            url, data=json.dumps(payload).encode("utf-8"),
-            headers={**headers, "Content-Type": "application/json"}, method="PUT"
-        )
-        with urllib.request.urlopen(req_put, timeout=6) as resp:
-            pass
-    except Exception:
-        pass
+            req_put = urllib.request.Request(
+                url, data=json.dumps(payload).encode("utf-8"),
+                headers={**headers, "Content-Type": "application/json"}, method="PUT"
+            )
+            with urllib.request.urlopen(req_put, timeout=6) as resp:
+                if resp.status in (200, 201):
+                    break  # コミット成功
+        except urllib.error.HTTPError as he:
+            if he.code == 409:  # Conflict: SHAが他スレッドで更新された場合、次ループで最新SHAを取得して再試行
+                continue
+            break
+        except Exception:
+            break
 
 def persist_watchlist(current_list: List[str], gas_url: str, gh_token: str, gh_repo: str, trigger_code: str = ""):
-    """①ローカル保存 + ②GitHubリポジトリ永続化 + ③GAS同期 を多層実行"""
+    """①ローカル保存 + ②GitHubリポジトリ永続化 + ③GAS同期 を多層実行（単一コミットで競合根絶）"""
     clean_list = sorted(list(set(fmt_code(c) for c in current_list if c)))
     json_str = json.dumps(clean_list, ensure_ascii=False, indent=2)
 
     # 1. ローカル保存 (即時)
     save_watchlist_to_disk(clean_list)
 
-    # 2. GitHubへの非同期コミット (Streamlit Cloud再起動対策)
+    # 2. GitHubへの非同期コミット (Streamlit Cloud再起動対策: 1回にまとめて送信)
     if gh_token and gh_repo:
         msg = f"Update watchlist: {len(clean_list)} items (changed: {trigger_code})"
         t_gh = threading.Thread(target=_sync_to_github_worker, args=(gh_token, gh_repo, json_str, msg), daemon=True)
         t_gh.start()
 
-    # 3. GASへの非同期送信
+    # 3. GASへの非同期送信 (複数銘柄にも対応)
     if gas_url and gas_url.startswith("https://script.google.com") and trigger_code:
-        is_w = (trigger_code in clean_list)
-        t_gas = threading.Thread(target=_send_to_gas_worker, args=(gas_url, trigger_code, is_w), daemon=True)
-        t_gas.start()
+        codes = [c.strip() for c in trigger_code.split(",") if c.strip()]
+        for c in codes:
+            is_w = (c in clean_list)
+            t_gas = threading.Thread(target=_send_to_gas_worker, args=(gas_url, c, is_w), daemon=True)
+            t_gas.start()
 
 # --- ユーザー設定（野村担保ローン借入額・日興貸株日数）永続化マネージャー ---
 DEFAULT_SETTINGS: Dict[str, Any] = {
@@ -1210,9 +1276,9 @@ def main():
     df_hist = normalize_history(raw_hist)
     df_mast = normalize_master(raw_mast)
 
-    # 監視リストのロード（watchlist.json を唯一の正とし、余分な過去フラグは合流させない）
+    # 監視リストのロード（ローカル + GitHub API + Sheets の多層フェイルオーバーで再起動時の初期化を完全防止）
     if "watchlist" not in st.session_state:
-        st.session_state["watchlist"] = load_initial_watchlist()
+        st.session_state["watchlist"] = load_initial_watchlist(df_mast=df_mast)
 
     df_analyzed, stats, all_timestamps = analyze_stocks(
         df_hist, df_mast,
@@ -1535,13 +1601,24 @@ def main():
                         changed_items.append((c, new_val))
 
             if changed_items:
+                changed_codes = []
                 for c, is_watched in changed_items:
                     if is_watched and c not in st.session_state["watchlist"]:
                         st.session_state["watchlist"].append(c)
+                        changed_codes.append(c)
                     elif not is_watched and c in st.session_state["watchlist"]:
                         st.session_state["watchlist"].remove(c)
-                    # 多層保存（ローカル + GitHub API + GAS）
-                    persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo, trigger_code=c)
+                        changed_codes.append(c)
+
+                if changed_codes:
+                    # ★コミット多重起動・競合コンフリクト根絶: ループ外で1回だけまとめて永続化を実行
+                    persist_watchlist(
+                        st.session_state["watchlist"],
+                        gas_api_url,
+                        gh_token,
+                        gh_repo,
+                        trigger_code=",".join(changed_codes)
+                    )
 
                 # ★最重要: エディタキーのバージョンを上げて前回の編集キャッシュ（行番号）を完全破棄！
                 st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
@@ -1656,14 +1733,39 @@ def main():
             format_func=lambda c: f"{c} {df_analyzed[df_analyzed['code']==c]['name'].values[0] if len(df_analyzed[df_analyzed['code']==c])>0 else ''}"
         )
         if codes_plot:
-            sub = df_hist[df_hist["code"].isin(codes_plot)]
+            sub = df_hist[df_hist["code"].isin(codes_plot)].copy()
             if not sub.empty:
+                if "dt" not in sub.columns or sub["dt"].isna().all():
+                    sub["dt"] = pd.to_datetime(sub["timestamp"], errors="coerce")
+                
+                # ★時系列ソート崩れ完全根絶: dt (日付時刻) で厳密に昇順ソート＆重複排除
+                sub = sub.dropna(subset=["dt"]).sort_values(by="dt", ascending=True)
+                sub = sub.drop_duplicates(subset=["dt", "code"], keep="last")
+                
+                # 表示用ラベル (例: "09/14 17:00")
+                sub["display_time"] = sub["dt"].dt.strftime("%m/%d %H:%M")
+                
+                # 時系列順序のソート順リスト（左から右への時系列順を絶対保証）
+                sorted_timeline = sub.sort_values(by="dt")["display_time"].unique().tolist()
+                
                 chart = alt.Chart(sub).mark_line(point=True).encode(
-                    x=alt.X("timestamp:N", title="取得日時"),
+                    x=alt.X(
+                        "display_time:O",
+                        sort=sorted_timeline,
+                        title="取得日時 (時系列昇順)",
+                        axis=alt.Axis(labelAngle=-40)
+                    ),
                     y=alt.Y("nikko:Q", title="日興在庫数 (株)"),
                     color=alt.Color("name:N", title="銘柄名"),
-                    tooltip=["name", "code", "timestamp", "nikko", "rakuten", "sbi"]
-                ).properties(height=380)
+                    tooltip=[
+                        alt.Tooltip("name:N", title="銘柄名"),
+                        alt.Tooltip("code:N", title="コード"),
+                        alt.Tooltip("timestamp:N", title="取得日時"),
+                        alt.Tooltip("nikko:Q", title="日興在庫(株)", format=","),
+                        alt.Tooltip("sbi:N", title="SBI"),
+                        alt.Tooltip("rakuten:Q", title="楽天(株)", format=",")
+                    ]
+                ).properties(height=400)
                 st.altair_chart(chart, use_container_width=True)
 
     # ----------------------------------------------------
