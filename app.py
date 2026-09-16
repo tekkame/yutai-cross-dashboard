@@ -223,7 +223,7 @@ DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v11.11 (Intuitive Breakeven & JST Interest & Robust Editor)"
+APP_VERSION = "v12.0 (Multi-Month Dashboard & Safe Rotation Scraper)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -754,7 +754,7 @@ def get_github_token() -> str:
 # ============================================================
 # 4. アプリ内直接スクレイピング ＆ 日時基準（Daily Snapshot）抽出
 # ============================================================
-def run_direct_scrape() -> Tuple[bool, str]:
+def run_direct_scrape(rights_arg: Optional[str] = None) -> Tuple[bool, str]:
     """Streamlit アプリ内で直接 Gokigen API ＆ Routine優待データをスクレイピングして即時更新"""
     try:
         import main as scraper_main
@@ -762,13 +762,14 @@ def run_direct_scrape() -> Tuple[bool, str]:
         ret = scraper_main.run(
             dry_run=True,
             out_dir=str(DATA_DIR),
-            rights_arg=None,
+            rights_arg=rights_arg,
             kengi_arg=None,
             watch_expr=None
         )
         if ret == 0:
             st.cache_data.clear()
-            return True, "最新在庫データを直接スクレイピング取得しました！"
+            target_str = f"【{rights_arg}】" if rights_arg else "【当月】"
+            return True, f"{target_str} の最新在庫データを直接スクレイピング取得しました！"
         return False, f"スクレイピング処理でエラーが発生しました (code: {ret})"
     except Exception as e:
         return False, f"スクレイピング実行例外: {e}"
@@ -1105,24 +1106,72 @@ def save_user_settings(settings: Dict[str, Any], gh_token: str = "", gh_repo: st
         t_gh.start()
 
 # ============================================================
-# 6. データローダー (リポジトリ内最新CSV 完全スタンドアロン)
+# 6. 月別検出 ＆ データローダー (リポジトリ内最新CSV 完全スタンドアロン)
 # ============================================================
+def get_available_months_info() -> List[Dict[str, Any]]:
+    """現在から向こう12ヶ月のリストを生成し、ローカルデータの有無・銘柄数・表示ラベルを付加"""
+    today = get_now_jst().date()
+    curr_y, curr_m = today.year, today.month
+    try:
+        from utils.dates import resolve_rights
+        resolved_rights, _ = resolve_rights(today)
+        curr_y, curr_m = map(int, resolved_rights.split("-"))
+    except Exception:
+        pass
+
+    info_list = []
+    for i in range(12):
+        tot_m = curr_m + i
+        y = curr_y + (tot_m - 1) // 12
+        m = (tot_m - 1) % 12 + 1
+        m_str = f"{y}-{m:02d}"
+
+        h_files = sorted([f for f in os.listdir(DATA_DIR) if f.startswith(f"history_{m_str}_") and f.endswith(".csv")]) if DATA_DIR.exists() else []
+        m_files = sorted([f for f in os.listdir(DATA_DIR) if f.startswith(f"master_{m_str}_") and f.endswith(".csv")], reverse=True) if DATA_DIR.exists() else []
+
+        has_data = len(h_files) > 0
+        tag = "今月" if i == 0 else ("来月" if i == 1 else f"{i}ヶ月先")
+        stock_count = 0
+        if m_files:
+            try:
+                with open(DATA_DIR / m_files[0], encoding="utf-8-sig") as fp:
+                    stock_count = max(0, sum(1 for _ in fp) - 1)
+            except Exception:
+                pass
+
+        if has_data:
+            label = f"📅 {m_str} ({m}月・{tag}) ➔ ✅ {stock_count}銘柄"
+        else:
+            label = f"📅 {m_str} ({m}月・{tag}) ➔ ⚠️ 未取得"
+
+        info_list.append({
+            "month": m_str,
+            "label": label,
+            "has_data": has_data,
+            "stock_count": stock_count,
+            "tag": tag,
+        })
+    return info_list
+
 @st.cache_data(ttl=30, show_spinner=False)
-def load_all_combined_data() -> Tuple[pd.DataFrame, pd.DataFrame, str]:
+def load_all_combined_data(target_month: Optional[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
     hist_dfs = []
     latest_master = pd.DataFrame()
     data_source_msg = "🔒 セキュア稼働 (GitHub連携)"
 
     # リポジトリ内の最新CSV (GitHub Actions自動更新データ) を直接高速読込
     if DATA_DIR.exists():
-        h_files = sorted([DATA_DIR / f for f in os.listdir(DATA_DIR) if f.startswith("history_") and f.endswith(".csv")])
+        prefix_h = f"history_{target_month}_" if target_month else "history_"
+        prefix_m = f"master_{target_month}_" if target_month else "master_"
+
+        h_files = sorted([DATA_DIR / f for f in os.listdir(DATA_DIR) if f.startswith(prefix_h) and f.endswith(".csv")])
         for hf in h_files:
             try:
                 df_tmp = pd.read_csv(hf)
                 if not df_tmp.empty: hist_dfs.append(df_tmp)
             except Exception: pass
 
-        m_files = sorted([DATA_DIR / f for f in os.listdir(DATA_DIR) if f.startswith("master_") and f.endswith(".csv")], reverse=True)
+        m_files = sorted([DATA_DIR / f for f in os.listdir(DATA_DIR) if f.startswith(prefix_m) and f.endswith(".csv")], reverse=True)
         if m_files:
             try: latest_master = pd.read_csv(m_files[0])
             except Exception: pass
@@ -1132,9 +1181,10 @@ def load_all_combined_data() -> Tuple[pd.DataFrame, pd.DataFrame, str]:
         t_col = "取得日時" if "取得日時" in combined_hist.columns else combined_hist.columns[0]
         c_col = "コード" if "コード" in combined_hist.columns else combined_hist.columns[1]
         combined_hist = combined_hist.drop_duplicates(subset=[t_col, c_col], keep="last")
-        return combined_hist, latest_master, data_source_msg
+        month_label = f" ({target_month})" if target_month else ""
+        return combined_hist, latest_master, f"{data_source_msg}{month_label}"
 
-    return pd.DataFrame(), pd.DataFrame(), "データなし"
+    return pd.DataFrame(), pd.DataFrame(), f"データなし ({target_month})" if target_month else "データなし"
 
 def normalize_history(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return pd.DataFrame()
@@ -1206,6 +1256,7 @@ def analyze_stocks(
     nikko_lend_days: Optional[int] = None,
     nomura_rate: float = DEFAULT_NOMURA_RATE,
     has_nomura_loan: bool = False,
+    default_rights_month: str = "2026-09",
 ) -> Tuple[pd.DataFrame, Dict[str, Any], List[str]]:
     if df_hist is None or df_hist.empty:
         return pd.DataFrame(), {}, []
@@ -1364,7 +1415,7 @@ def analyze_stocks(
             stock_price = round(funds_man * 10000 / 100.0)
 
         # 権利月と想定貸株日数の算出 (自動モード時は東証祝日カレンダー・現在日時から完全自動算出)
-        rights_val = row.get("rights_month") or m_row.get("rights_month") or "2026-09"
+        rights_val = row.get("rights_month") or m_row.get("rights_month") or default_rights_month
         if nikko_lend_days is not None and nikko_lend_days > 0:
             item_lend_days = int(nikko_lend_days)
             is_auto_days = False
@@ -1543,12 +1594,43 @@ def main():
     gh_token = get_github_token()
     gh_repo = safe_get_secret("GITHUB_REPO", "tekkame/yutai-cross-dashboard")
 
+    # 権利月の自動検出と選択肢リスト生成
+    available_months_info = get_available_months_info()
+    month_options = [m["month"] for m in available_months_info]
+    month_labels = {m["month"]: m["label"] for m in available_months_info}
+
+    url_month = st.query_params.get("month", "")
+    default_month = month_options[0] if month_options else "2026-09"
+    if url_month in month_options:
+        init_month = url_month
+    elif "selected_month" in st.session_state and st.session_state["selected_month"] in month_options:
+        init_month = st.session_state["selected_month"]
+    else:
+        init_month = default_month
+
     # ユーザー設定（野村担保ローン借入額・起算日・日興貸株日数）の読み込み（URLパラメータ + GitHub + ローカル多層復元）
     if "user_settings" not in st.session_state:
         st.session_state["user_settings"] = load_user_settings(gh_token=gh_token, gh_repo=gh_repo)
     current_settings = st.session_state["user_settings"]
 
     with st.sidebar:
+        st.markdown("### 📅 権利月の選択")
+        chosen_month = st.selectbox(
+            "表示・分析する権利月",
+            options=month_options,
+            index=month_options.index(init_month) if init_month in month_options else 0,
+            format_func=lambda m: month_labels.get(m, m),
+            help="当月・翌月・各月の優待クロス銘柄・在庫状況を切り替えます。"
+        )
+        if chosen_month != st.session_state.get("selected_month"):
+            st.session_state["selected_month"] = chosen_month
+            st.query_params["month"] = chosen_month
+            st.rerun()
+
+        st.session_state["selected_month"] = chosen_month
+        st.query_params["month"] = chosen_month
+
+        st.markdown("---")
         st.markdown("### 🏦 野村證券 担保ローン設定")
         nomura_loan_val = float(current_settings.get("nomura_loan_man", 0.0))
         loan_in = st.number_input(
@@ -1602,17 +1684,17 @@ def main():
         elapsed_days = max(1, (today_d - loan_date_in).days + 1)
         nomura_accrued = nomura_daily * elapsed_days
 
-        # 直近代表（9月末）現渡受渡日（2026-10-02等）までの総日数・総見込利息
-        _, _, _, close_settle_9m = calc_stock_lend_days("2026-09")
-        total_loan_days = max(elapsed_days, (close_settle_9m - loan_date_in).days + 1)
+        # 選択中の権利月（chosen_month）の現渡受渡日までの総日数・総見込利息を自動算出
+        auto_days_month, exec_d_cur, op_s_cur, cl_s_cur = calc_stock_lend_days(chosen_month)
+        total_loan_days = max(elapsed_days, (cl_s_cur - loan_date_in).days + 1)
         nomura_expected_total = nomura_daily * total_loan_days
 
         st.markdown(
             f'<div style="background:#0f172a; border:1px solid #3b82f6; border-radius:6px; padding:0.5rem 0.65rem; margin-bottom:0.6rem;">'
-            f'<div style="color:#93c5fd; font-size:11px; font-weight:600;">💡 野村利息シミュレーション</div>'
+            f'<div style="color:#93c5fd; font-size:11px; font-weight:600;">💡 野村利息シミュレーション ({chosen_month}基準)</div>'
             f'<div style="color:#ffffff; font-size:16px; font-weight:bold; font-family:\'JetBrains Mono\', monospace; margin:2px 0;">¥{nomura_daily:,} <span style="font-size:11px; font-weight:normal; color:#94a3b8;">/日</span></div>'
             f'<div style="color:#cbd5e1; font-size:11px; margin-top:3px;">📅 借入日({loan_date_in.strftime("%m/%d")})〜本日: <b style="color:#38bdf8;">{elapsed_days}日間</b> ➔ <b style="color:#fde68a;">¥{nomura_accrued:,}</b></div>'
-            f'<div style="color:#94a3b8; font-size:10.5px; margin-top:2px;">🏁 現渡受渡({close_settle_9m.strftime("%m/%d")})まで: <b>{total_loan_days}日間</b> ➔ <b style="color:#c084fc;">¥{nomura_expected_total:,}</b></div>'
+            f'<div style="color:#94a3b8; font-size:10.5px; margin-top:2px;">🏁 現渡受渡({cl_s_cur.strftime("%m/%d")})まで: <b>{total_loan_days}日間</b> ➔ <b style="color:#c084fc;">¥{nomura_expected_total:,}</b></div>'
             f'<div style="color:#6ee7b7; font-size:10px; margin-top:3px;">💾 借入条件はクラウド・ローカルに記憶済</div>'
             f'</div>',
             unsafe_allow_html=True
@@ -1637,17 +1719,14 @@ def main():
 
         current_days_val = int(current_settings.get("nikko_lend_days", 14))
 
-        # 代表月（9月末）の自動日数を算出プレビュー
-        auto_days_9m, exec_d_cur, op_s_cur, cl_s_cur = calc_stock_lend_days("2026-09")
-
         if new_mode == "auto":
             effective_lend_days = None  # None で analyze_stocks に銘柄ごと自動計算させる
             st.markdown(
                 f'<div style="background:#0f172a; border:1px solid #10b981; border-radius:6px; padding:0.45rem 0.65rem; margin-bottom:0.5rem;">'
                 f'<div style="color:#6ee7b7; font-size:11px; font-weight:600;">🤖 祝日・約定日時 完全自動連動中</div>'
                 f'<div style="color:#ffffff; font-size:13px; margin:2px 0;">約定予定日: <b style="color:#38bdf8;">{exec_d_cur.strftime("%m/%d")}</b> (受渡: {op_s_cur.strftime("%m/%d")})</div>'
-                f'<div style="color:#cbd5e1; font-size:11px;">直近代表(9月末): <b style="color:#34d399; font-size:14px;">{auto_days_9m}日分</b> (現渡受渡: {cl_s_cur.strftime("%m/%d")})</div>'
-                f'<div style="color:#94a3b8; font-size:10px; margin-top:2px;">※10月末/12月末/翌年3月/20日権利銘柄も個別自動判定</div>'
+                f'<div style="color:#cbd5e1; font-size:11px;">{chosen_month}代表: <b style="color:#34d399; font-size:14px;">{auto_days_month}日分</b> (現渡受渡: {cl_s_cur.strftime("%m/%d")})</div>'
+                f'<div style="color:#94a3b8; font-size:10px; margin-top:2px;">※20日権利銘柄や月末権利日も個別自動判定</div>'
                 f'</div>',
                 unsafe_allow_html=True
             )
@@ -1679,17 +1758,44 @@ def main():
         else:
             st.info("ℹ️ ローカル保存モード")
 
-        if st.button("📥 監視リスト再読込", use_container_width=True):
-            st.session_state["watchlist"] = reload_watchlist_fresh()
-            st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
-            st.toast("監視リストをGitHub＆ローカルから最新再読込しました")
-            st.rerun()
+        c_sync1, c_sync2 = st.columns(2)
+        with c_sync1:
+            if st.button("📥 監視再読込", use_container_width=True):
+                st.session_state["watchlist"] = reload_watchlist_fresh()
+                st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
+                st.toast("監視リストをGitHub＆ローカルから最新再読込しました")
+                st.rerun()
+        with c_sync2:
+            if st.button("🚀 最新取得", use_container_width=True, type="primary"):
+                with st.spinner(f"{chosen_month} の最新データを取得中..."):
+                    ok, msg = run_direct_scrape(rights_arg=chosen_month)
+                    if ok:
+                        st.toast("取得成功！")
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
         st.caption(f"App Version: {APP_VERSION}")
 
-    raw_hist, raw_mast, data_source_msg = load_all_combined_data()
+    raw_hist, raw_mast, data_source_msg = load_all_combined_data(target_month=chosen_month)
     if raw_hist is None or raw_hist.empty:
-        st.warning("⚠️ 在庫データがありません。")
+        st.markdown(
+            f'<div style="background:#1e293b; border:2px dashed #f59e0b; border-radius:8px; padding:1.5rem; text-align:center; margin:2rem 0;">'
+            f'<div style="font-size:22px; font-weight:bold; color:#fde68a; margin-bottom:0.5rem;">📅 {chosen_month} の在庫データはまだ取得されていません</div>'
+            f'<div style="color:#cbd5e1; font-size:13px; margin-bottom:1.2rem;">下のボタンを押すと、相手サーバーに配慮した安全な直接スクレイピングを実行し、即座に画面へ反映します。</div>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+        c_btn1, c_btn2, c_btn3 = st.columns([1, 2, 1])
+        with c_btn2:
+            if st.button(f"🚀 {chosen_month} のデータを今すぐ取得する", use_container_width=True, type="primary"):
+                with st.spinner(f"{chosen_month} の優待データをスクレイピング取得中..."):
+                    ok, msg = run_direct_scrape(rights_arg=chosen_month)
+                    if ok:
+                        st.toast(f"{chosen_month} のデータ取得に成功しました！")
+                        st.rerun()
+                    else:
+                        st.error(msg)
         return
 
     df_hist = normalize_history(raw_hist)
@@ -1706,7 +1812,8 @@ def main():
         annual_rate=annual_rate,
         nikko_lend_days=effective_lend_days,
         nomura_rate=rate_val,
-        has_nomura_loan=(loan_in is not None and loan_in > 0)
+        has_nomura_loan=(loan_in is not None and loan_in > 0),
+        default_rights_month=chosen_month
     )
 
     # サイドバーに監視銘柄のクイック管理（直接コード追加・一覧確認・個別解除）を追加
@@ -1750,12 +1857,13 @@ def main():
                             st.rerun()
 
     # ステータスバー (インデントなしで安全に描画)
-    nikko_status_label = f"銘柄別自動 ({auto_days_9m}日等)" if new_mode == "auto" else f"{effective_lend_days}日分"
+    nikko_status_label = f"銘柄別自動 ({auto_days_month}日等)" if new_mode == "auto" else f"{effective_lend_days}日分"
     nomura_status_str = f"¥{nomura_daily:,}/日 (累計:¥{nomura_accrued:,})" if loan_in > 0 else "借入なし"
     status_bar_html = (
         f'<div class="status-bar">'
         f'<div class="status-bar-title">⚡ <b>優待クロス在庫トラッカー</b> <span style="font-size:11px;font-weight:normal;color:#94a3b8;">({APP_VERSION})</span></div>'
         f'<div class="status-tags">'
+        f'<span class="tag tag-amber" style="font-weight:bold; font-size:12px; background:#451a03; border:1px solid #f59e0b; color:#fde68a;">📅 権利月: {chosen_month}</span>'
         f'<span class="tag tag-green">{data_source_msg}</span>'
         f'<span class="tag tag-blue">最新取得: {stats.get("latest_ts", "―")}</span>'
         f'<span class="tag tag-amber">⭐ 監視中: {stats.get("watch_count", 0)}銘柄</span>'

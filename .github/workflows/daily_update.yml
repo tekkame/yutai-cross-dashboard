@@ -2,16 +2,26 @@ name: daily_scraper
 
 on:
   schedule:
-    # 平日 JST 17:00 / 20:00 (UTC 08:00 / 11:00)
+    # ① 平日 JST 17:00 / 20:00 (UTC 08:00 / 11:00) -> 当月（勝負月・毎日2回）
     - cron: '0 8,11 * * 1-5'
+    # ② 平日 JST 12:00 (UTC 03:00) -> 翌月（昼スロット・毎日1回）
+    - cron: '0 3 * * 1-5'
+    # ③ 毎日 JST 04:00 (UTC 19:00前日) -> 翌々月以降（深夜閑散時間帯・曜日別ローテーション）
+    - cron: '0 19 * * *'
   workflow_dispatch:
     inputs:
-      rights:
-        description: '対象権利月 YYYY-MM (空欄で自動解決)'
+      mode:
+        description: '実行モード (auto: 時刻判定 / current: 当月 / next: 翌月 / future: 曜日ローテーション)'
         required: false
-        default: ''
-      kengi:
-        description: '権利付最終日 YYYY-MM-DD (空欄で自動算出)'
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - current
+          - next
+          - future
+      rights:
+        description: '特定権利月を指定する場合 (例: 2026-10 / 空欄ならmodeに従う)'
         required: false
         default: ''
 
@@ -21,7 +31,7 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -37,12 +47,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Scraper
+      - name: Run Rotation Scraper
         run: |
-          args=(--dry-run --out-dir data)
-          [ -n "${{ inputs.rights }}" ] && args+=(--rights "${{ inputs.rights }}")
-          [ -n "${{ inputs.kengi }}" ] && args+=(--kengi "${{ inputs.kengi }}")
-          python main.py "${args[@]}"
+          args=(--out-dir data)
+          if [ -n "${{ inputs.rights }}" ]; then
+            args+=(--rights "${{ inputs.rights }}")
+          else
+            mode="${{ inputs.mode }}"
+            [ -z "$mode" ] && mode="auto"
+            args+=(--mode "$mode")
+          fi
+          python run_rotation_scrape.py "${args[@]}"
 
       - name: Verify scraped data
         run: |
