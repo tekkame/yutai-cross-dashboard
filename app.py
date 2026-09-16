@@ -215,7 +215,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v11.7 (Loan Settings Full Persistence)"
+APP_VERSION = "v11.8 (Table Alignment & Wait Savings Explicit)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
