@@ -1438,7 +1438,7 @@ def analyze_stocks(
             saving_1d = int(round(funds_yen * DEFAULT_NIKKO_LEND_RATE / 365.0))
             saving_2d = saving_1d * 2
             if saving_1d > 0:
-                saving_str = f"-¥{saving_1d:,} / -¥{saving_2d:,}"
+                saving_str = f"1日:-¥{saving_1d:,} (2日:-¥{saving_2d:,})"
 
         # 損益分岐待機日数（優待価値から現行コストを引いた余力日数）
         wait_days = None
@@ -1839,21 +1839,21 @@ def main():
             trend_html_val = r.get("trend_html") or trend_plain
 
             row_html = (
-                f'<div class="target-item-row">'
-                f'<div class="target-code">{c}</div>'
-                f'<div class="target-name" title="{n}">{n}</div>'
-                f'<div style="text-align:right; font-weight:600; color:#fde68a;">{funds_m}</div>'
-                f'<div style="text-align:right; font-weight:600; color:{nikko_color};">{n_disp}</div>'
-                f'<div style="text-align:center; font-weight:600; color:{sbi_color};">{s_disp}</div>'
-                f'<div style="font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{trend_plain}">{trend_html_val}</div>'
-                f'<div class="target-yutai" title="{y_val}">{y_val}</div>'
-                f'<div style="text-align:right; font-weight:600; color:#cbd5e1;">{n_cost_str}</div>'
-                f'<div style="text-align:center; font-size:10px; color:#38bdf8;" title="1日待機/2日待機で削減される日興貸株料">{r.get("saving_str", "―")}</div>'
-                f'<div style="text-align:right; font-weight:600; color:#86efac;">{n_net_str}</div>'
-                f'<div style="text-align:center; font-size:11px; color:#fde68a;">{r.get("wait_label", "―")}</div>'
-                f'<div style="text-align:right; color:#86efac;">{y_pct}</div>'
-                f'<div style="text-align:center; font-size:11px;">{sig}</div>'
-                f'</div>'
+                f'<tr style="border-bottom: 1px dashed #1e293b;">'
+                f'<td style="padding: 4px 6px; font-family:\'JetBrains Mono\',monospace; color:#93c5fd; font-weight:600;">{c}</td>'
+                f'<td style="padding: 4px 6px; color:#f1f5f9; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{n}">{n}</td>'
+                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#fde68a;">{funds_m}</td>'
+                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:{nikko_color};">{n_disp}</td>'
+                f'<td style="padding: 4px 6px; text-align:center; font-weight:600; color:{sbi_color};">{s_disp}</td>'
+                f'<td style="padding: 4px 6px; font-size:11px; white-space:nowrap;" title="{trend_plain}">{trend_html_val}</td>'
+                f'<td style="padding: 4px 6px; color:#cbd5e1; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{y_val}">{y_val}</td>'
+                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#cbd5e1;">{n_cost_str}</td>'
+                f'<td style="padding: 4px 6px; text-align:center; font-size:10.5px; font-weight:600; color:#38bdf8; background:rgba(56,189,248,0.08); border-radius:4px;" title="1日待機/2日待機で削減される日興貸株料">{r.get("saving_str", "―")}</td>'
+                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#86efac;">{n_net_str}</td>'
+                f'<td style="padding: 4px 6px; text-align:center; font-size:11px; color:#fde68a;">{r.get("wait_label", "―")}</td>'
+                f'<td style="padding: 4px 6px; text-align:right; color:#86efac;">{y_pct}</td>'
+                f'<td style="padding: 4px 6px; text-align:center; font-size:11px;">{sig}</td>'
+                f'</tr>'
             )
             rows_html_list.append(row_html)
 
@@ -1910,12 +1910,29 @@ def main():
             f'<div class="target-summary-item"><span class="label">見込実質手取:</span><span class="value" style="color:#86efac;">{profit_disp}</span></div>'
             f'<div class="target-summary-item"><span class="label">野村借入利息:</span><span class="value" style="color:#c084fc;">¥{nomura_daily:,}</span> <span style="font-size:10.5px;color:#94a3b8;">/日</span></div>'
             f'</div>'
-            f'<div style="margin-top: 0.35rem; background: #0f172a; border-radius: 4px; padding: 0.4rem 0.6rem;">'
-            f'<div class="target-item-row" style="border-bottom: 1px solid #334155; font-weight: bold; color: #94a3b8; padding-bottom: 0.2rem;">'
-            f'<div>コード</div><div>銘柄名</div><div style="text-align:right;">最低取得価格</div><div style="text-align:right;">日興最新</div><div style="text-align:center;">SBI最新</div><div>残数推移</div><div>優待内容</div><div style="text-align:right;">日興手数料</div><div style="text-align:center;">待機節約</div><div style="text-align:right;">実質手取</div><div style="text-align:center;">損益分岐</div><div style="text-align:right;">利回り</div><div style="text-align:center;">判定</div>'
-            f'</div>'
-            f'<div style="max-height: 155px; overflow-y: auto; padding-right: 4px;">'
+            f'<div style="margin-top: 0.35rem; background: #0f172a; border-radius: 6px; padding: 0.2rem 0.4rem; border: 1px solid #1e293b; overflow-x: auto; overflow-y: auto; max-height: 200px;">'
+            f'<table style="width: 100%; min-width: 1120px; border-collapse: collapse; font-size: 11.5px; text-align: left;">'
+            f'<thead style="position: sticky; top: 0; background: #0f172a; z-index: 5;">'
+            f'<tr style="border-bottom: 1px solid #334155; color: #94a3b8; font-weight: bold;">'
+            f'<th style="padding: 5px 6px; width: 50px;">コード</th>'
+            f'<th style="padding: 5px 6px; width: 120px;">銘柄名</th>'
+            f'<th style="padding: 5px 6px; text-align: right; width: 80px;">最低取得価格</th>'
+            f'<th style="padding: 5px 6px; text-align: right; width: 80px;">日興最新</th>'
+            f'<th style="padding: 5px 6px; text-align: center; width: 60px;">SBI最新</th>'
+            f'<th style="padding: 5px 6px; width: 155px;">残数推移 (日興/SBI)</th>'
+            f'<th style="padding: 5px 6px; min-width: 180px;">優待内容</th>'
+            f'<th style="padding: 5px 6px; text-align: right; width: 90px;">日興手数料</th>'
+            f'<th style="padding: 5px 6px; text-align: center; width: 140px; color: #38bdf8;">待機節約 (1日/2日)</th>'
+            f'<th style="padding: 5px 6px; text-align: right; width: 80px;">実質手取</th>'
+            f'<th style="padding: 5px 6px; text-align: center; width: 85px;">損益分岐</th>'
+            f'<th style="padding: 5px 6px; text-align: right; width: 55px;">利回り</th>'
+            f'<th style="padding: 5px 6px; text-align: center; width: 75px;">判定</th>'
+            f'</tr>'
+            f'</thead>'
+            f'<tbody>'
             f'{all_rows_html}'
+            f'</tbody>'
+            f'</table>'
             f'</div>'
             f'</div>'
         )
@@ -2119,7 +2136,7 @@ def main():
                     "残数推移": st.column_config.TextColumn("残数推移 (日興/SBI)", width="medium", help="日興およびSBIの在庫トレンド (↘減少/↗増加/維持/急変)"),
                     "優待内容": st.column_config.TextColumn("優待内容", width="large", help="優待品目・金額・数量"),
                     "日興手数料": st.column_config.TextColumn("日興手数料", width="small", help=nikko_col_help),
-                    "待機節約": st.column_config.TextColumn("待機節約 (1日/2日)", width="small", help="日興一般信用売りをあと1日または2日待機した場合に節約できる貸株料（年1.9%）。在庫に余裕があれば待機することで手数料を低減できます"),
+                    "待機節約": st.column_config.TextColumn("待機節約 (1日/2日)", width="medium", help="日興一般信用売りをあと1日または2日待機した場合に節約できる貸株料（年1.9%）。在庫に余裕があれば待機することで手数料を低減できます"),
                     "実質手取": st.column_config.TextColumn("実質手取", width="small", help="優待価値(円)から日興優待クロスコストを差し引いた実質純利益"),
                     "損益分岐": st.column_config.TextColumn("損益分岐 (待機可)", width="small", help="日興貸株料＋野村利息が優待価値を超えて赤字転落するまでの限界待機日数"),
                     "その他証券": st.column_config.TextColumn("その他証券", width="small", help="カブ・楽天・GMO等の残数・信号"),
