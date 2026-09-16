@@ -1598,15 +1598,20 @@ def main():
     available_months_info = get_available_months_info()
     month_options = [m["month"] for m in available_months_info]
     month_labels = {m["month"]: m["label"] for m in available_months_info}
-
-    url_month = st.query_params.get("month", "")
     default_month = month_options[0] if month_options else "2026-09"
-    if url_month in month_options:
-        init_month = url_month
-    elif "selected_month" in st.session_state and st.session_state["selected_month"] in month_options:
-        init_month = st.session_state["selected_month"]
+
+    # 権利月選択の単一信頼源（Single Source of Truth）
+    url_month = st.query_params.get("month", "")
+    if "selected_month" not in st.session_state:
+        chosen_month = url_month if url_month in month_options else default_month
+        st.session_state["selected_month"] = chosen_month
     else:
-        init_month = default_month
+        if url_month in month_options and url_month != st.session_state.get("_last_synced_month"):
+            st.session_state["selected_month"] = url_month
+        chosen_month = st.session_state["selected_month"]
+
+    st.session_state["_last_synced_month"] = chosen_month
+    st.query_params["month"] = chosen_month
 
     # ユーザー設定（野村担保ローン借入額・起算日・日興貸株日数）の読み込み（URLパラメータ + GitHub + ローカル多層復元）
     if "user_settings" not in st.session_state:
@@ -1615,20 +1620,18 @@ def main():
 
     with st.sidebar:
         st.markdown("### 📅 権利月の選択")
-        chosen_month = st.selectbox(
+        sb_selected = st.selectbox(
             "表示・分析する権利月",
             options=month_options,
-            index=month_options.index(init_month) if init_month in month_options else 0,
+            index=month_options.index(chosen_month) if chosen_month in month_options else 0,
             format_func=lambda m: month_labels.get(m, m),
+            key=f"sb_month_select_{chosen_month}",
             help="当月・翌月・各月の優待クロス銘柄・在庫状況を切り替えます。"
         )
-        if chosen_month != st.session_state.get("selected_month"):
-            st.session_state["selected_month"] = chosen_month
-            st.query_params["month"] = chosen_month
+        if sb_selected != chosen_month:
+            st.session_state["selected_month"] = sb_selected
+            st.query_params["month"] = sb_selected
             st.rerun()
-
-        st.session_state["selected_month"] = chosen_month
-        st.query_params["month"] = chosen_month
 
         st.markdown("---")
         st.markdown("### 🏦 野村證券 担保ローン設定")
@@ -1975,24 +1978,33 @@ def main():
 
             c_esc = html.escape(str(c))
             n_esc = html.escape(str(n))
+            funds_m_esc = html.escape(str(funds_m))
+            n_disp_esc = html.escape(str(n_disp))
+            s_disp_esc = html.escape(str(s_disp))
             y_esc = html.escape(str(y_val))
             trend_plain_esc = html.escape(str(trend_plain))
+            n_cost_str_esc = html.escape(str(n_cost_str))
+            saving_str_esc = html.escape(str(r.get("saving_str", "―")))
+            n_net_str_esc = html.escape(str(n_net_str))
+            wait_label_esc = html.escape(str(r.get("wait_label", "―")))
+            y_pct_esc = html.escape(str(y_pct))
+            sig_esc = html.escape(str(sig))
 
             row_html = (
                 f'<tr style="border-bottom: 1px dashed #1e293b;">'
                 f'<td style="padding: 4px 6px; font-family:\'JetBrains Mono\',monospace; color:#93c5fd; font-weight:600;">{c_esc}</td>'
                 f'<td style="padding: 4px 6px; color:#f1f5f9; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{n_esc}">{n_esc}</td>'
-                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#fde68a;">{funds_m}</td>'
-                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:{nikko_color};">{n_disp}</td>'
-                f'<td style="padding: 4px 6px; text-align:center; font-weight:600; color:{sbi_color};">{s_disp}</td>'
+                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#fde68a;">{funds_m_esc}</td>'
+                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:{nikko_color};">{n_disp_esc}</td>'
+                f'<td style="padding: 4px 6px; text-align:center; font-weight:600; color:{sbi_color};">{s_disp_esc}</td>'
                 f'<td style="padding: 4px 6px; font-size:11px; white-space:nowrap;" title="{trend_plain_esc}">{trend_html_val}</td>'
                 f'<td style="padding: 4px 6px; color:#cbd5e1; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{y_esc}">{y_esc}</td>'
-                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#cbd5e1;">{n_cost_str}</td>'
-                f'<td style="padding: 4px 6px; text-align:center; font-size:10.5px; font-weight:600; color:#38bdf8; background:rgba(56,189,248,0.08); border-radius:4px;" title="1日待機/2日待機で削減される日興貸株料">{r.get("saving_str", "―")}</td>'
-                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#86efac;">{n_net_str}</td>'
-                f'<td style="padding: 4px 6px; text-align:center; font-size:11px; color:#fde68a;">{r.get("wait_label", "―")}</td>'
-                f'<td style="padding: 4px 6px; text-align:right; color:#86efac;">{y_pct}</td>'
-                f'<td style="padding: 4px 6px; text-align:center; font-size:11px;">{sig}</td>'
+                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#cbd5e1;">{n_cost_str_esc}</td>'
+                f'<td style="padding: 4px 6px; text-align:center; font-size:10.5px; font-weight:600; color:#38bdf8; background:rgba(56,189,248,0.08); border-radius:4px;" title="1日待機/2日待機で削減される日興貸株料">{saving_str_esc}</td>'
+                f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#86efac;">{n_net_str_esc}</td>'
+                f'<td style="padding: 4px 6px; text-align:center; font-size:11px; color:#fde68a;">{wait_label_esc}</td>'
+                f'<td style="padding: 4px 6px; text-align:right; color:#86efac;">{y_pct_esc}</td>'
+                f'<td style="padding: 4px 6px; text-align:center; font-size:11px;">{sig_esc}</td>'
                 f'</tr>'
             )
             rows_html_list.append(row_html)
@@ -2121,23 +2133,29 @@ def main():
         quick_months.append(chosen_month)
         quick_labels[chosen_month] = f"{chosen_month.split('-')[1]}月 ({chosen_month})"
 
-    c_m1, c_m2 = st.columns([1.2, 8.8])
-    with c_m1:
-        st.markdown("<div style='font-size:12px; font-weight:600; color:#cbd5e1; padding-top:6px;'>📅 権利月切替:</div>", unsafe_allow_html=True)
-    with c_m2:
-        quick_selected = st.radio(
-            "権利月クイック選択",
-            options=quick_months,
-            index=quick_months.index(chosen_month) if chosen_month in quick_months else 0,
-            format_func=lambda m: quick_labels.get(m, m),
-            horizontal=True,
-            label_visibility="collapsed",
-            key="main_quick_month_radio"
-        )
-        if quick_selected != chosen_month:
-            st.session_state["selected_month"] = quick_selected
-            st.query_params["month"] = quick_selected
-            st.rerun()
+    # ----------------------------------------------------
+    # メイン画面 権利月クイック切替バー (ステートレス・ピルボタン群で巻き戻りバグ完全根絶)
+    # ----------------------------------------------------
+    quick_months = month_options[:6]  # 向こう半年分
+    if chosen_month not in quick_months:
+        quick_months.append(chosen_month)
+
+    c_m0, *c_mb = st.columns([1.1] + [1.5] * len(quick_months))
+    with c_m0:
+        st.markdown("<div style='font-size:12px; font-weight:600; color:#cbd5e1; padding-top:7px;'>📅 権利月:</div>", unsafe_allow_html=True)
+    
+    for idx, m in enumerate(quick_months):
+        with c_mb[idx]:
+            has_data = any(x["month"] == m and x["has_data"] for x in available_months_info)
+            badge = "✅" if has_data else "⚠️"
+            is_active = (m == chosen_month)
+            btn_label = f"{m.split('-')[1]}月 {badge}" if not is_active else f"▶ {m.split('-')[1]}月"
+            b_type = "primary" if is_active else "secondary"
+            if st.button(btn_label, key=f"quick_btn_m_{m}", type=b_type, use_container_width=True, help=f"{m} の優待在庫画面へ即座に切替"):
+                if m != chosen_month:
+                    st.session_state["selected_month"] = m
+                    st.query_params["month"] = m
+                    st.rerun()
 
     # ----------------------------------------------------
     # コントロールバー
