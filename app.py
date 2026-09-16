@@ -13,6 +13,7 @@ app.py - 株主優待クロス在庫トラッカー ＆ 実戦意思決定ダッ
 from __future__ import annotations
 
 import base64
+import calendar
 import datetime as dt
 import io
 import json
@@ -206,7 +207,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v11.1 (Resilient Multi-Layer Sync & Chrono Chart)"
+APP_VERSION = "v11.2 (Auto Lend Days Engine & Multi-Year Calendar)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -243,6 +244,191 @@ def calc_nomura_daily_interest(loan_man: float, rate: float = DEFAULT_NOMURA_RAT
         return 0
     loan_yen = loan_man * 10000.0
     return int(round(loan_yen * rate / 365.0))
+
+# ============================================================
+# 日本の祝日（2024年〜2032年）＆ 東証権利落ち・貸株日数完全自動算出エンジン
+# ============================================================
+def get_japan_holidays() -> Set[dt.date]:
+    """2024年〜2032年の日本の祝日・振替休日・国民の休日一覧（内閣府公表基準）"""
+    h: Set[dt.date] = set()
+    # 2024年
+    h.update([
+        dt.date(2024, 1, 1), dt.date(2024, 1, 8), dt.date(2024, 2, 11), dt.date(2024, 2, 12),
+        dt.date(2024, 2, 23), dt.date(2024, 3, 20), dt.date(2024, 4, 29), dt.date(2024, 5, 3),
+        dt.date(2024, 5, 4), dt.date(2024, 5, 5), dt.date(2024, 5, 6), dt.date(2024, 7, 15),
+        dt.date(2024, 8, 11), dt.date(2024, 8, 12), dt.date(2024, 9, 16), dt.date(2024, 9, 22),
+        dt.date(2024, 9, 23), dt.date(2024, 10, 14), dt.date(2024, 11, 3), dt.date(2024, 11, 4),
+        dt.date(2024, 11, 23)
+    ])
+    # 2025年
+    h.update([
+        dt.date(2025, 1, 1), dt.date(2025, 1, 13), dt.date(2025, 2, 11), dt.date(2025, 2, 23),
+        dt.date(2025, 2, 24), dt.date(2025, 3, 20), dt.date(2025, 4, 29), dt.date(2025, 5, 3),
+        dt.date(2025, 5, 4), dt.date(2025, 5, 5), dt.date(2025, 5, 6), dt.date(2025, 7, 21),
+        dt.date(2025, 8, 11), dt.date(2025, 9, 15), dt.date(2025, 9, 23), dt.date(2025, 10, 13),
+        dt.date(2025, 11, 3), dt.date(2025, 11, 23), dt.date(2025, 11, 24)
+    ])
+    # 2026年 (シルバーウィーク: 9/21敬老, 9/22国民の休日, 9/23秋分)
+    h.update([
+        dt.date(2026, 1, 1), dt.date(2026, 1, 12), dt.date(2026, 2, 11), dt.date(2026, 2, 23),
+        dt.date(2026, 3, 20), dt.date(2026, 4, 29), dt.date(2026, 5, 3), dt.date(2026, 5, 4),
+        dt.date(2026, 5, 5), dt.date(2026, 5, 6), dt.date(2026, 7, 20), dt.date(2026, 8, 11),
+        dt.date(2026, 9, 21), dt.date(2026, 9, 22), dt.date(2026, 9, 23), dt.date(2026, 10, 12),
+        dt.date(2026, 11, 3), dt.date(2026, 11, 23)
+    ])
+    # 2027年
+    h.update([
+        dt.date(2027, 1, 1), dt.date(2027, 1, 11), dt.date(2027, 2, 11), dt.date(2027, 2, 23),
+        dt.date(2027, 3, 21), dt.date(2027, 3, 22), dt.date(2027, 4, 29), dt.date(2027, 5, 3),
+        dt.date(2027, 5, 4), dt.date(2027, 5, 5), dt.date(2027, 7, 19), dt.date(2027, 8, 11),
+        dt.date(2027, 9, 20), dt.date(2027, 9, 23), dt.date(2027, 10, 11), dt.date(2027, 11, 3),
+        dt.date(2027, 11, 23)
+    ])
+    # 2028年
+    h.update([
+        dt.date(2028, 1, 1), dt.date(2028, 1, 10), dt.date(2028, 2, 11), dt.date(2028, 2, 23),
+        dt.date(2028, 3, 20), dt.date(2028, 4, 29), dt.date(2028, 5, 3), dt.date(2028, 5, 4),
+        dt.date(2028, 5, 5), dt.date(2028, 7, 17), dt.date(2028, 8, 11), dt.date(2028, 9, 18),
+        dt.date(2028, 9, 22), dt.date(2028, 10, 9), dt.date(2028, 11, 3), dt.date(2028, 11, 23)
+    ])
+    # 2029年
+    h.update([
+        dt.date(2029, 1, 1), dt.date(2029, 1, 8), dt.date(2029, 2, 11), dt.date(2029, 2, 12),
+        dt.date(2029, 2, 23), dt.date(2029, 3, 20), dt.date(2029, 4, 29), dt.date(2029, 4, 30),
+        dt.date(2029, 5, 3), dt.date(2029, 5, 4), dt.date(2029, 5, 5), dt.date(2029, 7, 16),
+        dt.date(2029, 8, 11), dt.date(2029, 9, 17), dt.date(2029, 9, 23), dt.date(2029, 9, 24),
+        dt.date(2029, 10, 8), dt.date(2029, 11, 3), dt.date(2029, 11, 23)
+    ])
+    # 2030年
+    h.update([
+        dt.date(2030, 1, 1), dt.date(2030, 1, 14), dt.date(2030, 2, 11), dt.date(2030, 2, 23),
+        dt.date(2030, 2, 24), dt.date(2030, 3, 20), dt.date(2030, 4, 29), dt.date(2030, 5, 3),
+        dt.date(2030, 5, 4), dt.date(2030, 5, 5), dt.date(2030, 5, 6), dt.date(2030, 7, 15),
+        dt.date(2030, 8, 11), dt.date(2030, 8, 12), dt.date(2030, 9, 16), dt.date(2030, 9, 23),
+        dt.date(2030, 10, 14), dt.date(2030, 11, 3), dt.date(2030, 11, 4), dt.date(2030, 11, 23)
+    ])
+    # 2031年
+    h.update([
+        dt.date(2031, 1, 1), dt.date(2031, 1, 13), dt.date(2031, 2, 11), dt.date(2031, 2, 23),
+        dt.date(2031, 2, 24), dt.date(2031, 3, 21), dt.date(2031, 4, 29), dt.date(2031, 5, 3),
+        dt.date(2031, 5, 4), dt.date(2031, 5, 5), dt.date(2031, 5, 6), dt.date(2031, 7, 21),
+        dt.date(2031, 8, 11), dt.date(2031, 9, 15), dt.date(2031, 9, 23), dt.date(2031, 10, 13),
+        dt.date(2031, 11, 3), dt.date(2031, 11, 23), dt.date(2031, 11, 24)
+    ])
+    # 2032年 (シルバーウィーク: 9/20敬老, 9/21国民の休日, 9/22秋分)
+    h.update([
+        dt.date(2032, 1, 1), dt.date(2032, 1, 12), dt.date(2032, 2, 11), dt.date(2032, 2, 23),
+        dt.date(2032, 3, 20), dt.date(2032, 4, 29), dt.date(2032, 5, 3), dt.date(2032, 5, 4),
+        dt.date(2032, 5, 5), dt.date(2032, 7, 19), dt.date(2032, 8, 11), dt.date(2032, 9, 20),
+        dt.date(2032, 9, 21), dt.date(2032, 9, 22), dt.date(2032, 10, 11), dt.date(2032, 11, 3),
+        dt.date(2032, 11, 23)
+    ])
+    return h
+
+JAPAN_HOLIDAYS = get_japan_holidays()
+
+def is_tse_business_day(d: dt.date) -> bool:
+    """東証営業日判定（土日・国民の祝日・年末年始 12/31〜1/3 は休業）"""
+    if d.weekday() >= 5: return False
+    if (d.month == 12 and d.day == 31) or (d.month == 1 and d.day in (1, 2, 3)):
+        return False
+    if d in JAPAN_HOLIDAYS: return False
+    return True
+
+def add_business_days(start_date: dt.date, num_days: int) -> dt.date:
+    """東証営業日を加算・減算（土日祝・年末年始を自動スキップ）"""
+    cur = start_date
+    step = 1 if num_days >= 0 else -1
+    rem = abs(num_days)
+    while rem > 0:
+        cur += dt.timedelta(days=step)
+        if is_tse_business_day(cur):
+            rem -= 1
+    return cur
+
+def get_settlement_date(exec_date: dt.date) -> dt.date:
+    """約定日の受渡日 (T+2 営業日後) を算出"""
+    return add_business_days(exec_date, 2)
+
+def get_current_execution_date(now_dt: Optional[dt.datetime] = None) -> dt.date:
+    """現在日時から今注文を出した場合の東証約定日を判定
+    - 平日 15:30 より前: 当日約定
+    - 平日 15:30 以降 または 東証休業日: 翌東証営業日約定
+    """
+    if now_dt is None: now_dt = dt.datetime.now()
+    today = now_dt.date()
+    if is_tse_business_day(today) and now_dt.time() < dt.time(15, 30):
+        return today
+    cur = today + dt.timedelta(days=1)
+    while not is_tse_business_day(cur):
+        cur += dt.timedelta(days=1)
+    return cur
+
+def parse_rights_month(val: Any) -> Tuple[int, int]:
+    """権利月文字列（例: '2026-09', '9月', '9', '2026/09', '20日'等）を解析して (month, day) を返す"""
+    if val is None or str(val).strip() in ("", "-", "―", "nan", "None"):
+        return (9, 0)
+    s = str(val).strip()
+    day = 20 if "20日" in s or ("20" in s and "日" in s) else 0
+    m = re.search(r"(\d{4})[-/](\d{1,2})", s)
+    if m:
+        return (int(m.group(2)), day)
+    m = re.search(r"(\d{1,2})月", s)
+    if m:
+        return (int(m.group(1)), day)
+    m = re.search(r"^(\d{1,2})$", s)
+    if m:
+        return (int(m.group(1)), day)
+    return (9, day)
+
+def get_stock_rights_dates(year: int, month: int, day: int = 0) -> Tuple[dt.date, dt.date, dt.date, dt.date]:
+    """対象年月の (権利確定日, 権利付最終売買日, 権利落ち日, 現渡受渡日) を算出"""
+    if day == 0:
+        _, last_d = calendar.monthrange(year, month)
+        target = dt.date(year, month, last_d)
+    else:
+        target = dt.date(year, month, day)
+
+    # 権利確定日 (休業日の場合は前営業日)
+    rec_d = target
+    while not is_tse_business_day(rec_d):
+        rec_d -= dt.timedelta(days=1)
+
+    # 権利付最終売買日 (T-2営業日)
+    last_trade = add_business_days(rec_d, -2)
+
+    # 権利落ち日 (翌営業日)
+    drop_d = add_business_days(last_trade, 1)
+
+    # 現渡の受渡日 (権利確定日の2営業日後 ＝ 権利確定受渡)
+    close_settle = get_settlement_date(rec_d)
+
+    return rec_d, last_trade, drop_d, close_settle
+
+def calc_stock_lend_days(
+    rights_val: Any,
+    now_dt: Optional[dt.datetime] = None
+) -> Tuple[int, dt.date, dt.date, dt.date]:
+    """対象銘柄の権利年月と現在日時から、今約定した場合の【想定貸株日数】を完全自動計算
+    戻り値: (lend_days, exec_date, open_settle, close_settle)
+    """
+    if now_dt is None: now_dt = dt.datetime.now()
+    exec_d = get_current_execution_date(now_dt)
+
+    month, day = parse_rights_month(rights_val)
+
+    # ターゲット年を判定 (現在年で権利付最終日を過ぎていれば翌年)
+    year = exec_d.year
+    rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
+    if exec_d > last_trade:
+        year += 1
+        rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
+
+    # 新規売建受渡日 (約定日の2営業日後)
+    open_settle = get_settlement_date(exec_d)
+
+    lend_days = max(1, (close_settle - open_settle).days)
+    return lend_days, exec_d, open_settle, close_settle
 
 # ============================================================
 # 3. 堅牢なフォーマッター
@@ -768,6 +954,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "nomura_loan_man": 0.0,
     "nomura_rate": DEFAULT_NOMURA_RATE,
     "nikko_lend_days": 14,
+    "nikko_mode": "auto",
     "nikko_buy_rate": DEFAULT_NIKKO_BUY_RATE,
     "nikko_lend_rate": DEFAULT_NIKKO_LEND_RATE,
 }
@@ -794,8 +981,9 @@ def save_user_settings(settings: Dict[str, Any], gh_token: str = "", gh_repo: st
         pass
     if gh_token and gh_repo:
         loan_v = settings.get("nomura_loan_man", 0)
+        mode_v = settings.get("nikko_mode", "auto")
         days_v = settings.get("nikko_lend_days", 14)
-        msg = f"Save user settings (Nomura Loan: {loan_v}万, Nikko Days: {days_v}d)"
+        msg = f"Save user settings (Nomura Loan: {loan_v}万, Mode: {mode_v}, Nikko Days: {days_v}d)"
         t_gh = threading.Thread(
             target=_sync_to_github_worker,
             args=(gh_token, gh_repo, json_str, msg, "data/user_settings.json"),
@@ -903,7 +1091,8 @@ def normalize_master(df: pd.DataFrame) -> pd.DataFrame:
         "コード": "code", "銘柄名": "name", "優待内容": "yutai_content",
         "優待価値": "yutai_value", "優待価値(円)": "yutai_value",
         "必要資金": "funds_man", "必要資金(万)": "funds_man", "資金万円": "funds_man",
-        "利回り(%)": "yield_pct", "総合利回り": "yield_pct", "売建上限": "gmo_limit"
+        "利回り(%)": "yield_pct", "総合利回り": "yield_pct", "売建上限": "gmo_limit",
+        "権利年月": "rights_month", "権利確定月": "rights_month", "権利月": "rights_month"
     }
     for orig, standard in col_map.items():
         if orig in d.columns and standard not in d.columns:
@@ -922,7 +1111,7 @@ def analyze_stocks(
     watchlist: List[str],
     nikko_th: float = 10000.0,
     annual_rate: float = 0.014,
-    nikko_lend_days: int = 14,
+    nikko_lend_days: Optional[int] = None,
     nomura_rate: float = DEFAULT_NOMURA_RATE,
 ) -> Tuple[pd.DataFrame, Dict[str, Any], List[str]]:
     if df_hist is None or df_hist.empty:
@@ -1081,6 +1270,15 @@ def analyze_stocks(
         if stock_price is None and funds_man is not None:
             stock_price = round(funds_man * 10000 / 100.0)
 
+        # 権利月と想定貸株日数の算出 (自動モード時は東証祝日カレンダー・現在日時から完全自動算出)
+        rights_val = row.get("rights_month") or m_row.get("rights_month") or "2026-09"
+        if nikko_lend_days is not None and nikko_lend_days > 0:
+            item_lend_days = int(nikko_lend_days)
+            is_auto_days = False
+        else:
+            item_lend_days, _, _, _ = calc_stock_lend_days(rights_val)
+            is_auto_days = True
+
         net_profit = None
         limit_days_int = None
         nikko_cost = 0
@@ -1090,7 +1288,7 @@ def analyze_stocks(
         nomura_item_daily_interest = 0
 
         if funds_yen < 99999990 and funds_yen > 0:
-            nikko_cost = calc_nikko_cost(funds_yen, lend_days=nikko_lend_days)
+            nikko_cost = calc_nikko_cost(funds_yen, lend_days=item_lend_days)
             nikko_cost_str = f"¥{nikko_cost:,}"
             if yutai_val is not None and yutai_val > 0:
                 net_profit_nikko = int(round(yutai_val - nikko_cost))
@@ -1144,6 +1342,9 @@ def analyze_stocks(
                 yutai_val=yutai_val,
                 code=code
             ),
+            "rights_month": str(rights_val),
+            "lend_days": item_lend_days,
+            "is_auto_days": is_auto_days,
             "nikko_cost": nikko_cost,
             "nikko_cost_str": nikko_cost_str,
             "net_profit_nikko": net_profit_nikko,
@@ -1224,21 +1425,54 @@ def main():
         )
 
         st.markdown("### ⏱️ 日興優待クロス設定")
-        current_days_val = int(current_settings.get("nikko_lend_days", 14))
-        lend_days_in = st.number_input(
-            "想定貸株日数 (日)",
-            min_value=1,
-            max_value=90,
-            value=current_days_val,
-            step=1,
-            help="今クロスした場合の権利落ち受渡日までの実日数。例: 9/16約定=14日, 9/17約定=8日, 9/18約定=7日, 9/24約定=4日"
+        nikko_mode_cur = current_settings.get("nikko_mode", "auto")
+        mode_options = ["🤖 銘柄・日時から自動設定 (推奨)", "✏️ 手動で一括指定"]
+        mode_idx = 0 if nikko_mode_cur == "auto" else 1
+        selected_mode_label = st.radio(
+            "貸株日数の算出方式",
+            mode_options,
+            index=mode_idx,
+            horizontal=False,
+            help="自動設定: 銘柄の権利月（月末/20日等）と現在日時（平日15:30前後・祝日）から東証休業日カレンダー（2024〜2032年）に基づき日数を完全自動算出します。"
         )
-        if lend_days_in != current_days_val:
-            current_settings["nikko_lend_days"] = lend_days_in
+        new_mode = "auto" if "自動" in selected_mode_label else "manual"
+        if new_mode != nikko_mode_cur:
+            current_settings["nikko_mode"] = new_mode
             st.session_state["user_settings"] = current_settings
             save_user_settings(current_settings, gh_token, gh_repo)
 
-        st.caption(f"料率: 制度買金利 {DEFAULT_NIKKO_BUY_RATE*100:.2f}% (1日分) + 貸株料 {DEFAULT_NIKKO_LEND_RATE*100:.1f}% × {lend_days_in}日分 (ダイレクトコース手数料無料)")
+        current_days_val = int(current_settings.get("nikko_lend_days", 14))
+
+        # 代表月（9月末）の自動日数を算出プレビュー
+        auto_days_9m, exec_d_cur, op_s_cur, cl_s_cur = calc_stock_lend_days("2026-09")
+
+        if new_mode == "auto":
+            effective_lend_days = None  # None で analyze_stocks に銘柄ごと自動計算させる
+            st.markdown(
+                f'<div style="background:#0f172a; border:1px solid #10b981; border-radius:6px; padding:0.45rem 0.65rem; margin-bottom:0.5rem;">'
+                f'<div style="color:#6ee7b7; font-size:11px; font-weight:600;">🤖 祝日・約定日時 完全自動連動中</div>'
+                f'<div style="color:#ffffff; font-size:13px; margin:2px 0;">約定予定日: <b style="color:#38bdf8;">{exec_d_cur.strftime("%m/%d")}</b> (受渡: {op_s_cur.strftime("%m/%d")})</div>'
+                f'<div style="color:#cbd5e1; font-size:11px;">直近代表(9月末): <b style="color:#34d399; font-size:14px;">{auto_days_9m}日分</b> (現渡受渡: {cl_s_cur.strftime("%m/%d")})</div>'
+                f'<div style="color:#94a3b8; font-size:10px; margin-top:2px;">※10月末/12月末/翌年3月/20日権利銘柄も個別自動判定</div>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+            st.caption(f"料率: 制度買金利 {DEFAULT_NIKKO_BUY_RATE*100:.2f}% (1日分) + 貸株料 {DEFAULT_NIKKO_LEND_RATE*100:.1f}% × 各銘柄の受渡日数 (手数料無料)")
+        else:
+            lend_days_in = st.number_input(
+                "一括 想定貸株日数 (日)",
+                min_value=1,
+                max_value=90,
+                value=current_days_val,
+                step=1,
+                help="手動ですべての銘柄に同一の貸株日数を適用します。"
+            )
+            if lend_days_in != current_days_val:
+                current_settings["nikko_lend_days"] = lend_days_in
+                st.session_state["user_settings"] = current_settings
+                save_user_settings(current_settings, gh_token, gh_repo)
+            effective_lend_days = lend_days_in
+            st.caption(f"料率: 制度買金利 {DEFAULT_NIKKO_BUY_RATE*100:.2f}% (1日分) + 貸株料 {DEFAULT_NIKKO_LEND_RATE*100:.1f}% × {lend_days_in}日分 (ダイレクトコース手数料無料)")
 
         st.markdown("---")
         st.markdown("### ⚙️ システム設定 ＆ 監視リスト")
@@ -1285,7 +1519,7 @@ def main():
         watchlist=st.session_state["watchlist"],
         nikko_th=nikko_th,
         annual_rate=annual_rate,
-        nikko_lend_days=lend_days_in,
+        nikko_lend_days=effective_lend_days,
         nomura_rate=rate_val
     )
 
@@ -1328,6 +1562,7 @@ def main():
                             st.rerun()
 
     # ステータスバー (インデントなしで安全に描画)
+    nikko_status_label = f"銘柄別自動 ({auto_days_9m}日等)" if new_mode == "auto" else f"{effective_lend_days}日分"
     status_bar_html = (
         f'<div class="status-bar">'
         f'<div class="status-bar-title">⚡ <b>優待クロス在庫トラッカー</b> <span style="font-size:11px;font-weight:normal;color:#94a3b8;">({APP_VERSION})</span></div>'
@@ -1336,7 +1571,7 @@ def main():
         f'<span class="tag tag-blue">最新取得: {stats.get("latest_ts", "―")}</span>'
         f'<span class="tag tag-amber">⭐ 監視中: {stats.get("watch_count", 0)}銘柄</span>'
         f'<span class="tag tag-purple">🏦 野村利息: ¥{nomura_daily:,}/日</span>'
-        f'<span class="tag tag-gray">⏱️ 日興基準: {lend_days_in}日分</span>'
+        f'<span class="tag tag-gray">⏱️ 日興基準: {nikko_status_label}</span>'
         f'</div>'
         f'</div>'
     )
@@ -1356,6 +1591,7 @@ def main():
         funds_disp = f"¥{int(total_funds):,}" if total_funds > 0 else "―"
         cost_disp = f"¥{int(total_nikko_cost):,}" if total_nikko_cost > 0 else "¥0"
         profit_disp = f"¥{int(total_profit):,}" if total_profit is not None else "―"
+        cost_sub_label = "銘柄別自動算出" if new_mode == "auto" else f"{effective_lend_days}日分"
 
         rows_html_list = []
         for _, r in watch_df.sort_values(by="funds_yen").iterrows():
@@ -1366,7 +1602,11 @@ def main():
             s_disp = r["sbi_display"]
             trend_str = r["trend_combined"]
             y_val = r["yutai_content"]
-            n_cost_str = r["nikko_cost_str"]
+            n_cost_val = r["nikko_cost_str"]
+            if new_mode == "auto" and r.get("lend_days") and n_cost_val != "―":
+                n_cost_str = f"{n_cost_val} ({r['lend_days']}日)"
+            else:
+                n_cost_str = n_cost_val
             n_net_str = r["net_profit_nikko_str"]
             y_pct = f"{r['yield_pct']:.1f}%" if r["yield_pct"] is not None else "―"
             sig = r["signal"]
@@ -1401,7 +1641,7 @@ def main():
             f'<div class="target-header">⭐ 監視・目標銘柄ハイライト ({len(watch_df)}件ピン留め中)</div>'
             f'<div class="target-summary">'
             f'<div class="target-summary-item"><span class="label">拘束資金合計:</span><span class="value">{funds_disp}</span></div>'
-            f'<div class="target-summary-item"><span class="label">日興手数料計:</span><span class="value" style="color:#cbd5e1;">{cost_disp}</span> <span style="font-size:10.5px;color:#94a3b8;">({lend_days_in}日分)</span></div>'
+            f'<div class="target-summary-item"><span class="label">日興手数料計:</span><span class="value" style="color:#cbd5e1;">{cost_disp}</span> <span style="font-size:10.5px;color:#94a3b8;">({cost_sub_label})</span></div>'
             f'<div class="target-summary-item"><span class="label">見込実質手取:</span><span class="value" style="color:#86efac;">{profit_disp}</span></div>'
             f'<div class="target-summary-item"><span class="label">野村借入利息:</span><span class="value" style="color:#c084fc;">¥{nomura_daily:,}</span> <span style="font-size:10.5px;color:#94a3b8;">/日</span></div>'
             f'</div>'
@@ -1523,6 +1763,12 @@ def main():
     with tab1:
         display_rows = []
         for _, r in filtered_df.iterrows():
+            n_cost_val = str(r.get("nikko_cost_str", "―"))
+            if new_mode == "auto" and r.get("lend_days") and n_cost_val != "―":
+                n_cost_display = f"{n_cost_val} ({r['lend_days']}日)"
+            else:
+                n_cost_display = n_cost_val
+
             display_rows.append({
                 "⭐": bool(r.get("watch", False)),
                 "コード": str(r.get("code", "")),
@@ -1532,7 +1778,7 @@ def main():
                 "SBI最新": str(r.get("sbi_display", "―")),
                 "残数推移": str(r.get("trend_combined", "―")),
                 "優待内容": str(r.get("yutai_content", "―")),
-                "日興手数料": str(r.get("nikko_cost_str", "―")),
+                "日興手数料": n_cost_display,
                 "実質手取": str(r.get("net_profit_nikko_str", "―")),
                 "その他証券": str(r.get("other_brokers", "―")),
                 "優待利回り": f"{r['yield_pct']:.1f}%" if r["yield_pct"] is not None else "―",
@@ -1550,6 +1796,12 @@ def main():
                 st.session_state["editor_version"] = 0
             editor_key = f"yutai_data_editor_{st.session_state['editor_version']}"
 
+            nikko_col_help = (
+                "SMBC日興証券 一般信用売＋制度買現引（ダイレクトコース）。各銘柄の権利確定月・20日権利日・祝日・受渡日を完全自動判定した想定コスト"
+                if new_mode == "auto" else
+                f"SMBC日興証券 手数料概算（制度買金利3.55% 1日 + 貸株料1.9% × {effective_lend_days}日）"
+            )
+
             edited_table = st.data_editor(
                 df_table,
                 key=editor_key,
@@ -1565,7 +1817,7 @@ def main():
                     "SBI最新": st.column_config.TextColumn("SBI最新", width="small", help="SBI信号（◎▲×）。悪化・急変時は🚨タグを表示"),
                     "残数推移": st.column_config.TextColumn("残数推移 (日興/SBI)", width="medium", help="日興およびSBIの在庫トレンド (↘減少/↗増加/維持/急変)"),
                     "優待内容": st.column_config.TextColumn("優待内容", width="large", help="優待品目・金額・数量"),
-                    "日興手数料": st.column_config.TextColumn("日興手数料", width="small", help=f"SMBC日興証券で今クロスした場合の手数料概算（制度買金利3.55% 1日 + 貸株料1.9% × {lend_days_in}日）"),
+                    "日興手数料": st.column_config.TextColumn("日興手数料", width="small", help=nikko_col_help),
                     "実質手取": st.column_config.TextColumn("実質手取", width="small", help="優待価値(円)から日興優待クロスコストを差し引いた実質純利益"),
                     "その他証券": st.column_config.TextColumn("その他証券", width="small", help="カブ・楽天・GMO等の残数・信号"),
                     "優待利回り": st.column_config.TextColumn("優待利回り", width="small", help="総合利回り(%)"),
