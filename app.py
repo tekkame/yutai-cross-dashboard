@@ -209,13 +209,23 @@ st.markdown(ULTRA_COMPACT_CSS, unsafe_allow_html=True)
 # ============================================================
 # 2. 定数 & ファイルパス
 # ============================================================
+def safe_get_secret(key: str, default: str = "") -> str:
+    """Streamlit Secrets が未設定の環境でも例外を投げずに安全に値を取得"""
+    try:
+        if hasattr(st, "secrets") and key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
-DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
-DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v11.8 (Table Alignment & Wait Savings Explicit)"
+DEFAULT_SPREADSHEET_ID = safe_get_secret("SPREADSHEET_ID", "")
+DEFAULT_GAS_API_URL = safe_get_secret("GAS_API_URL", "")
+APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
+APP_VERSION = "v11.9 (Private Secret Auth & Standalone)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -732,14 +742,6 @@ def fmt_other_brokers(kabu_now: Any, rakuten_now: Any, gmo_now: str) -> str:
     if g and g != "―": parts.append(f"GMO:{g}")
     return " | ".join(parts) if parts else "―"
 
-def safe_get_secret(key: str, default: str = "") -> str:
-    """Streamlit Secrets が未設定の環境でも例外を投げずに安全に値を取得"""
-    try:
-        if hasattr(st, "secrets") and key in st.secrets:
-            return str(st.secrets[key])
-    except Exception:
-        pass
-    return os.environ.get(key, default)
 
 def get_github_token() -> str:
     """Streamlit Secrets, 環境変数, ローカルファイルから安全にGitHubトークンを取得"""
@@ -1119,26 +1121,15 @@ def save_user_settings(settings: Dict[str, Any], gh_token: str = "", gh_repo: st
         t_gh.start()
 
 # ============================================================
-# 6. データローダー (ローカル最新CSV + Google Sheets ハイブリッド)
+# 6. データローダー (リポジトリ内最新CSV 完全スタンドアロン)
 # ============================================================
 @st.cache_data(ttl=30, show_spinner=False)
-def fetch_sheet_csv(sheet_name: str, spreadsheet_id: str = DEFAULT_SPREADSHEET_ID) -> Optional[pd.DataFrame]:
-    if not spreadsheet_id: return None
-    url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq?tqx=out:csv&sheet={urllib.parse.quote(sheet_name)}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            return pd.read_csv(io.BytesIO(resp.read()))
-    except Exception:
-        return None
-
-@st.cache_data(ttl=30, show_spinner=False)
-def load_all_combined_data(spreadsheet_id: str = DEFAULT_SPREADSHEET_ID) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
+def load_all_combined_data() -> Tuple[pd.DataFrame, pd.DataFrame, str]:
     hist_dfs = []
     latest_master = pd.DataFrame()
-    data_source_msg = "ローカル蓄積CSV"
+    data_source_msg = "🔒 セキュア稼働 (GitHub連携)"
 
-    # 1. リポジトリ内の最新CSV (GitHub Actions自動更新データ) を最優先読込
+    # リポジトリ内の最新CSV (GitHub Actions自動更新データ) を直接高速読込
     if DATA_DIR.exists():
         h_files = sorted([DATA_DIR / f for f in os.listdir(DATA_DIR) if f.startswith("history_") and f.endswith(".csv")])
         for hf in h_files:
@@ -1151,16 +1142,6 @@ def load_all_combined_data(spreadsheet_id: str = DEFAULT_SPREADSHEET_ID) -> Tupl
         if m_files:
             try: latest_master = pd.read_csv(m_files[0])
             except Exception: pass
-
-    # 2. Googleスプレッドシートも取得可能なら連携
-    sheet_hist = fetch_sheet_csv("raw_history", spreadsheet_id=spreadsheet_id)
-    if sheet_hist is not None and not sheet_hist.empty:
-        hist_dfs.append(sheet_hist)
-        data_source_msg = "Googleスプレッドシート連携中"
-
-    sheet_mast = fetch_sheet_csv("master_list", spreadsheet_id=spreadsheet_id)
-    if sheet_mast is not None and not sheet_mast.empty:
-        latest_master = sheet_mast
 
     if hist_dfs:
         combined_hist = pd.concat(hist_dfs, ignore_index=True)
@@ -1536,6 +1517,45 @@ def analyze_stocks(
 # 8. メインUI
 # ============================================================
 def main():
+    # --- 🔒 プライベート・シークレット認証 ---
+    # ユーザー専用キー（URLパラメータ ?key=... または手動入力で認証）
+    url_key = st.query_params.get("key", "")
+    is_authenticated = st.session_state.get("authenticated", False) or (url_key == APP_SECRET_KEY)
+
+    if not is_authenticated:
+        # 未認証時はロック画面のみ表示（データ・設定・サイドバーは一切レンダリングしない）
+        st.markdown(
+            """
+            <div style="text-align:center; padding:3.5rem 1rem 1.5rem 1rem; max-width:460px; margin:auto;">
+                <div style="font-size:42px; margin-bottom:0.8rem;">🔒</div>
+                <h3 style="color:#f1f5f9; margin-bottom:0.4rem; font-weight:700;">プライベート・ダッシュボード</h3>
+                <p style="color:#94a3b8; font-size:12.5px; line-height:1.6; margin-bottom:1.2rem;">
+                    この優待クロス在庫トラッカーは非公開の個人専用環境です。<br>
+                    アクセス用の合言葉（キー）を入力してください。
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            input_key = st.text_input("合言葉（パスコード）", type="password", placeholder="合言葉を入力", label_visibility="collapsed")
+            if st.button("🔓 認証して開く", use_container_width=True, type="primary"):
+                if input_key == APP_SECRET_KEY:
+                    st.session_state["authenticated"] = True
+                    st.query_params["key"] = input_key
+                    st.toast("✅ 認証に成功しました！")
+                    st.rerun()
+                else:
+                    st.error("合言葉が正しくありません。")
+            st.caption("💡 一度開いた後のURL（?key=... 付き）をブックマーク／スマホのホーム画面に登録すると、次回以降ログイン不要でワンタップ起動できます。")
+        return
+
+    # 認証済みの場合、URLパラメータにキーを維持（ブックマーク・リロード時の利便性向上）
+    if "key" not in st.query_params or st.query_params.get("key") != APP_SECRET_KEY:
+        st.query_params["key"] = APP_SECRET_KEY
+    st.session_state["authenticated"] = True
+
     gh_token = get_github_token()
     gh_repo = safe_get_secret("GITHUB_REPO", "tekkame/yutai-cross-dashboard")
 
@@ -1665,36 +1685,26 @@ def main():
             st.caption(f"料率: 制度買金利 {DEFAULT_NIKKO_BUY_RATE*100:.2f}% (1日分) + 貸株料 {DEFAULT_NIKKO_LEND_RATE*100:.1f}% × {lend_days_in}日分 (ダイレクトコース手数料無料)")
 
         st.markdown("---")
-        st.markdown("### ⚙️ システム設定 ＆ 監視リスト")
-        sheet_id = st.text_input("スプレッドシートID", value=DEFAULT_SPREADSHEET_ID)
-        gas_api_url = st.text_input("GAS URL", value=DEFAULT_GAS_API_URL)
+        st.markdown("### ⚙️ アプリ設定")
         nikko_th = st.number_input("日興 警戒閾値 (株)", value=10000, step=1000)
         annual_rate = st.number_input("貸株年率 (他社比較用)", value=0.014, step=0.001, format="%.3f")
+        gas_api_url = ""
 
         st.markdown("##### 💾 永続化ステータス")
         if gh_token:
             st.success("✅ GitHub Token 連携中（クラウド自動保存OK）")
         else:
-            st.info("ℹ️ ローカル保存モード（SecretsにToken登録でクラウド自動保存可）")
+            st.info("ℹ️ ローカル保存モード")
 
-        col_btn1, col_btn2 = st.columns(2)
-        with col_btn1:
-            if st.button("📥 再読込", use_container_width=True):
-                st.session_state["watchlist"] = load_watchlist_from_disk()
-                st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
-                st.toast("監視リストを再読込しました")
-                st.rerun()
-        with col_btn2:
-            if st.button("🔄 6銘柄リセット", use_container_width=True):
-                st.session_state["watchlist"] = DEFAULT_WATCHLIST.copy()
-                st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
-                persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo)
-                st.toast("指定6銘柄に初期化リセットしました")
-                st.rerun()
+        if st.button("📥 監視リスト再読込", use_container_width=True):
+            st.session_state["watchlist"] = load_watchlist_from_disk()
+            st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
+            st.toast("監視リストを再読込しました")
+            st.rerun()
 
         st.caption(f"App Version: {APP_VERSION}")
 
-    raw_hist, raw_mast, data_source_msg = load_all_combined_data(spreadsheet_id=sheet_id)
+    raw_hist, raw_mast, data_source_msg = load_all_combined_data()
     if raw_hist is None or raw_hist.empty:
         st.warning("⚠️ 在庫データがありません。")
         return
