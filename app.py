@@ -143,7 +143,7 @@ html, body, [class*="css"] {
 
 .target-item-row {
     display: grid;
-    grid-template-columns: 55px 130px 70px 110px 95px 190px auto 55px 75px;
+    grid-template-columns: 50px 125px 68px 105px 85px 220px auto 55px 75px;
     gap: 0.4rem;
     align-items: center;
     padding: 0.2rem 0;
@@ -205,7 +205,7 @@ DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v10.2 (6-Stock Reset & Dynamic Watchlist Sync)"
+APP_VERSION = "v10.3 (Enhanced Yutai Details & Visual Smart Trends)"
 
 # ============================================================
 # 3. 堅牢なフォーマッター
@@ -272,22 +272,163 @@ def fmt_funds_man(funds_yen: Any) -> str:
         return f"{int(round(man))}万"
     return f"{man:.1f}万"
 
-def fmt_yutai_compact(content: str) -> str:
-    """優待内容から【100株】等の株数プレフィックスや冗長な注釈を除去し簡潔化"""
+# 主要・人気優待銘柄の正確かつ具体的な優待品名・金額マスタ（補完用）
+KNOWN_YUTAI = {
+    "3088": "マツキヨ商品券・ポイント 2,000円分",
+    "3167": "QUOカード 500円分 (または飲料等)",
+    "4751": "ABEMAプレミアム 3ヶ月無料 (約3,540円相当)",
+    "6412": "PGMゴルフ割引優待券 2,000円分",
+    "8052": "QUOカード 2,000円分",
+    "8173": "Joshin買物優待券 5,000円分 (200円引×25枚)",
+    "9831": "お買物優待券 1,000円分 (500円引×2枚)",
+    "8136": "ピューロランド共通優待券3枚+買物券1,000円",
+    "7513": "ビックカメラ・コジマ共通商品券 1,000円分",
+    "3679": "選べるギフトカタログ (約3,000円相当)",
+    "9201": "株主優待割引券 (国内線50%割引)",
+    "9202": "株主優待番号ご案内書 (国内線50%割引)",
+    "7458": "QUOカード 1,000円分",
+    "7419": "ノジマ買物優待割引券 (10%割引×5枚)",
+    "3844": "QUOカード 1,000円分",
+    "5262": "QUOカード 1,000円分",
+}
+
+def fmt_yutai_enhanced(content: str, yutai_val: Optional[float] = None, code: str = "") -> str:
+    """優待内容に数値（金額・数量）や種類を的確に追加し、簡潔かつ具体的に表示"""
+    c = str(code).strip()
+    if c in KNOWN_YUTAI:
+        return KNOWN_YUTAI[c]
+
     if not content or pd.isna(content):
+        if yutai_val and yutai_val > 0:
+            return f"優待品 ({int(round(yutai_val)):,}円相当)"
         return "―"
+
     s = str(content).strip()
     # 【100株】等の株数指定を除去
     s = re.sub(r"【[\d,]+株[^】]*】", "", s)
     # 【注：...】などの注記を除去
     s = re.sub(r"【注：[^】]*】", "", s)
-    s = re.sub(r"\[[^\]]*\]", "", s)
-    s = s.strip()
-    if not s:
-        return "優待あり"
-    if len(s) > 28:
-        return s[:27] + "…"
-    return s
+    s = re.sub(r"\[[^\]]*\]", "", s).strip()
+
+    # すでに金額・数量等の数値が含まれている場合はそのまま活かす
+    if re.search(r"\d+円|\d+万|相当|割引|無料|株主優待券|\d+枚|\d+kg|ポイント", s):
+        if len(s) > 34:
+            return s[:33] + "…"
+        return s
+
+    # 金額が入っていない短い品目名（QUO, 優待券, 自社製品等）の場合、種類を具体化し優待価値で補完
+    kind_map = {
+        "QUO": "QUOカード",
+        "QUO等": "QUOカード等",
+        "ﾎﾟｲﾝﾄ等": "買物ポイント等",
+        "ポイント等": "買物ポイント等",
+        "優待券": "買物・施設優待券",
+        "自社製品": "自社製品詰合せ",
+        "自Ｇ製品": "自社グループ製品",
+        "自社商品": "自社商品詰合せ",
+        "カタログ": "カタログギフト",
+        "ギフト": "ギフトカード",
+        "米": "お米",
+        "クーポン": "割引クーポン",
+    }
+    for k, v in kind_map.items():
+        if s == k:
+            s = v
+            break
+
+    val_str = ""
+    if yutai_val and yutai_val > 10:
+        val_str = f" ({int(round(yutai_val)):,}円相当)"
+
+    res = f"{s}{val_str}" if val_str else s
+    if len(res) > 34:
+        return res[:33] + "…"
+    return res
+
+def fmt_yutai_compact(content: str, yutai_val: Optional[float] = None, code: str = "") -> str:
+    return fmt_yutai_enhanced(content, yutai_val, code)
+
+def build_smart_trend(g_unique: pd.DataFrame, snap_label_map: Dict[str, str]) -> Tuple[str, str]:
+    """直感的にトレンドが把握できる見やすい残数推移（クリーンテキスト ＆ HTMLカラーバッジ）を生成"""
+    snaps = []
+    for _, r_snap in g_unique.iterrows():
+        ts = r_snap["timestamp"]
+        lbl = snap_label_map.get(ts, "")
+        n_val = to_float(r_snap.get("nikko"))
+        s_raw = r_snap.get("rtn_sbi") or r_snap.get("sbi") or "―"
+        s_sig = fmt_signal(str(s_raw))
+        snaps.append((lbl, n_val, s_sig))
+
+    if not snaps:
+        return "―", '<span style="color:#64748b;">―</span>'
+
+    # 日興推移
+    n_vals = [s[1] for s in snaps if s[1] is not None]
+    if not n_vals:
+        n_text = "日興: ―"
+        n_html = '<span style="color:#64748b;">日興: ―</span>'
+    elif len(n_vals) == 1:
+        n_text = f"日興 {fmt_qty(n_vals[0])}"
+        n_html = f'<span style="color:#94a3b8;">日興</span> <span style="color:#f1f5f9;font-weight:600;">{fmt_qty(n_vals[0])}</span>'
+    else:
+        prev_v = n_vals[-2]
+        now_v = n_vals[-1]
+        diff = now_v - prev_v
+        if diff < 0:
+            if diff <= -3000:
+                n_text = f"日興 {fmt_qty(prev_v)} ↘ {fmt_qty(now_v)} (🚨▼{abs(int(diff)):,})"
+                n_html = f'<span style="color:#94a3b8;">日興</span> <span style="color:#94a3b8;">{fmt_qty(prev_v)}</span> <span style="color:#f87171;font-weight:bold;">↘</span> <span style="color:#f87171;font-weight:bold;">{fmt_qty(now_v)}</span> <span style="color:#ef4444;font-size:10px;">(▼{abs(int(diff)):,})</span>'
+            else:
+                n_text = f"日興 {fmt_qty(prev_v)} ↘ {fmt_qty(now_v)}"
+                n_html = f'<span style="color:#94a3b8;">日興</span> <span style="color:#94a3b8;">{fmt_qty(prev_v)}</span> <span style="color:#f87171;font-weight:bold;">↘</span> <span style="color:#f87171;font-weight:600;">{fmt_qty(now_v)}</span>'
+        elif diff > 0:
+            if prev_v == 0:
+                n_text = f"日興 0 🔥 {fmt_qty(now_v)} (補充)"
+                n_html = f'<span style="color:#94a3b8;">日興</span> <span style="color:#64748b;">0</span> <span style="color:#f59e0b;font-weight:bold;">🔥</span> <span style="color:#34d399;font-weight:bold;">{fmt_qty(now_v)}</span>'
+            else:
+                n_text = f"日興 {fmt_qty(prev_v)} ↗ {fmt_qty(now_v)} (+{int(diff):,})"
+                n_html = f'<span style="color:#94a3b8;">日興</span> <span style="color:#94a3b8;">{fmt_qty(prev_v)}</span> <span style="color:#34d399;font-weight:bold;">↗</span> <span style="color:#34d399;font-weight:600;">{fmt_qty(now_v)}</span>'
+        else:
+            if now_v == 0:
+                n_text = "日興 0 (枯渇)"
+                n_html = '<span style="color:#64748b;">日興 0 (枯渇)</span>'
+            else:
+                n_text = f"日興 {fmt_qty(now_v)} (維持)"
+                n_html = f'<span style="color:#94a3b8;">日興</span> <span style="color:#cbd5e1;font-weight:600;">{fmt_qty(now_v)}</span> <span style="color:#64748b;font-size:10px;">(維持)</span>'
+
+    # SBI推移
+    s_vals = [s[2] for s in snaps if s[2] not in ("―", "", None)]
+    if not s_vals:
+        s_text = "SBI ―"
+        s_html = '<span style="color:#64748b;">SBI ―</span>'
+    elif len(s_vals) == 1:
+        s_text = f"SBI {s_vals[0]}"
+        s_col = "#a7f3d0" if s_vals[0] == "◎" else ("#f87171" if s_vals[0] in ("×", "▲") else "#94a3b8")
+        s_html = f'<span style="color:#94a3b8;">SBI</span> <span style="color:{s_col};font-weight:bold;">{s_vals[0]}</span>'
+    else:
+        prev_s = s_vals[-2]
+        now_s = s_vals[-1]
+        if prev_s == now_s:
+            s_text = f"SBI {now_s}"
+            s_col = "#a7f3d0" if now_s == "◎" else ("#f87171" if now_s in ("×", "▲") else "#94a3b8")
+            s_html = f'<span style="color:#94a3b8;">SBI</span> <span style="color:{s_col};font-weight:bold;">{now_s}</span>'
+        else:
+            if prev_s == "◎" and now_s in ("▲", "×"):
+                s_text = f"SBI 🚨{prev_s}➔{now_s}"
+                s_html = f'<span style="color:#94a3b8;">SBI</span> <span style="color:#a7f3d0;">{prev_s}</span> <span style="color:#ef4444;font-weight:bold;">➔</span> <span style="color:#f87171;font-weight:bold;background:#7f1d1d;padding:1px 4px;border-radius:3px;">🚨{now_s}</span>'
+            elif prev_s == "▲" and now_s == "×":
+                s_text = f"SBI 💥{prev_s}➔{now_s}"
+                s_html = f'<span style="color:#94a3b8;">SBI</span> <span style="color:#fca5a5;">{prev_s}</span> <span style="color:#ef4444;font-weight:bold;">➔</span> <span style="color:#f87171;font-weight:bold;background:#7f1d1d;padding:1px 4px;border-radius:3px;">💥{now_s}</span>'
+            elif prev_s in ("×", "▲") and now_s == "◎":
+                s_text = f"SBI 🔥{prev_s}➔{now_s}"
+                s_html = f'<span style="color:#94a3b8;">SBI</span> <span style="color:#94a3b8;">{prev_s}</span> <span style="color:#34d399;font-weight:bold;">➔</span> <span style="color:#a7f3d0;font-weight:bold;background:#065f46;padding:1px 4px;border-radius:3px;">🔥◎</span>'
+            else:
+                s_text = f"SBI {prev_s}➔{now_s}"
+                s_html = f'<span style="color:#94a3b8;">SBI</span> <span style="color:#94a3b8;">{prev_s}➔{now_s}</span>'
+
+    clean_combined = f"{n_text}  |  {s_text}"
+    html_combined = f"{n_html} &nbsp;|&nbsp; {s_html}"
+    return clean_combined, html_combined
 
 def fmt_other_brokers(kabu_now: Any, rakuten_now: Any, gmo_now: str) -> str:
     """カブ・楽天・GMO等のその他証券残数をコンパクトに連結"""
@@ -678,23 +819,10 @@ def analyze_stocks(
             g_sorted = g_df.sort_values(by="dt", ascending=True) if "dt" in g_df.columns else g_df
             g_unique = g_sorted.drop_duplicates(subset=["timestamp"])
             
-            n_parts = []
-            s_parts = []
-            for _, r_snap in g_unique.iterrows():
-                ts = r_snap["timestamp"]
-                lbl = snap_label_map.get(ts, "")
-                n_q = fmt_qty(to_float(r_snap.get("nikko")))
-                s_raw = r_snap.get("rtn_sbi") or r_snap.get("sbi") or "―"
-                s_q = fmt_signal(str(s_raw))
-                n_parts.append(f"{lbl}:{n_q}")
-                s_parts.append(f"{lbl}:{s_q}")
-
-            n_trend_str = "→".join(n_parts[-3:]) if n_parts else "―"
-            s_trend_str = "→".join(s_parts[-3:]) if s_parts else "―"
+            clean_str, html_str = build_smart_trend(g_unique, snap_label_map)
             trend_map[str(c_grp)] = {
-                "nikko": n_trend_str,
-                "sbi": s_trend_str,
-                "combined": f"日興[{n_trend_str}] | SBI[{s_trend_str}]"
+                "combined": clean_str,
+                "html": html_str
             }
 
     for _, row in df_latest.iterrows():
@@ -849,13 +977,18 @@ def analyze_stocks(
             "gmo_now": gmo_now,
             "other_brokers": fmt_other_brokers(kabu_now, rakuten_now, gmo_now),
             "trend_combined": c_trend.get("combined", "―"),
+            "trend_html": c_trend.get("html", "―"),
             "trend_nikko": c_trend.get("nikko", "―"),
             "trend_sbi": c_trend.get("sbi", "―"),
             "total_qty": total_qty,
             "funds_man": funds_man,
             "yutai_value": yutai_val,
             "yutai_content_raw": str(m_row.get("yutai_content") or row.get("yutai_content") or ""),
-            "yutai_content": fmt_yutai_compact(str(m_row.get("yutai_content") or row.get("yutai_content") or "")),
+            "yutai_content": fmt_yutai_enhanced(
+                str(m_row.get("yutai_content") or row.get("yutai_content") or ""),
+                yutai_val=yutai_val,
+                code=code
+            ),
             "yield_pct": to_float(m_row.get("yield_pct") or row.get("yield_pct")),
             "net_profit": net_profit,
             "limit_days_int": limit_days_int,
@@ -1010,6 +1143,9 @@ def main():
             sbi_color = "#f87171" if r["sbi_now"] in ("×", "▲") or r["is_sbi_drop"] else ("#a7f3d0" if r["sbi_now"] == "◎" else "#94a3b8")
             nikko_color = "#f87171" if r["is_nikko_drop"] or (r["nikko_now"] is not None and r["nikko_now"] < nikko_th) else "#a7f3d0"
 
+            trend_plain = r.get("trend_combined", "―")
+            trend_html_val = r.get("trend_html") or trend_plain
+
             row_html = (
                 f'<div class="target-item-row">'
                 f'<div class="target-code">{c}</div>'
@@ -1017,7 +1153,7 @@ def main():
                 f'<div style="text-align:right; font-weight:600; color:#fde68a;">{funds_m}</div>'
                 f'<div style="text-align:right; font-weight:600; color:{nikko_color};">{n_disp}</div>'
                 f'<div style="text-align:center; font-weight:600; color:{sbi_color};">{s_disp}</div>'
-                f'<div style="color:#94a3b8; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{trend_str}">{trend_str}</div>'
+                f'<div style="font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{trend_plain}">{trend_html_val}</div>'
                 f'<div class="target-yutai" title="{y_val}">{y_val}</div>'
                 f'<div style="text-align:right; color:#86efac;">{y_pct}</div>'
                 f'<div style="text-align:center; font-size:11px;">{sig}</div>'
