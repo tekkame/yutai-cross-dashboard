@@ -222,10 +222,8 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
-DEFAULT_SPREADSHEET_ID = safe_get_secret("SPREADSHEET_ID", "")
-DEFAULT_GAS_API_URL = safe_get_secret("GAS_API_URL", "")
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v11.10 (Resilient Watchlist & Sanitized Table & While Guard)"
+APP_VERSION = "v11.11 (Intuitive Breakeven & JST Interest & Robust Editor)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -951,18 +949,7 @@ def load_initial_watchlist(df_mast: Optional[pd.DataFrame] = None) -> List[str]:
 
     return DEFAULT_WATCHLIST.copy()
 
-# --- 非同期同期ワーカー (GAS ＆ GitHub API) ---
-def _send_to_gas_worker(gas_url: str, code: str, is_watched: bool):
-    try:
-        payload = json.dumps({"code": code, "watch": is_watched, "status": "未確保"}).encode("utf-8")
-        req = urllib.request.Request(
-            gas_url, data=payload, headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}, method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            pass
-    except Exception:
-        pass
-
+# --- 非同期同期ワーカー (GitHub API) ---
 def _sync_to_github_worker(token: str, repo: str, content_str: str, commit_msg: str, file_path: str = "data/watchlist.json"):
     """Streamlit Cloud 上での変更を GitHub リポジトリへ直接コミットして永久保持（競合リトライ付き）"""
     if not token or not repo: return
@@ -1002,8 +989,8 @@ def _sync_to_github_worker(token: str, repo: str, content_str: str, commit_msg: 
         except Exception:
             break
 
-def persist_watchlist(current_list: List[str], gas_url: str, gh_token: str, gh_repo: str, trigger_code: str = ""):
-    """①ローカル保存 + ②GitHubリポジトリ永続化 + ③GAS同期 を多層実行（単一コミットで競合根絶）"""
+def persist_watchlist(current_list: List[str], gh_token: str, gh_repo: str, trigger_code: str = ""):
+    """①ローカル保存 + ②GitHubリポジトリ永続化 を実行（単一コミットで競合根絶）"""
     clean_list = sorted(list(set(fmt_code(c) for c in current_list if c)))
     json_str = json.dumps(clean_list, ensure_ascii=False, indent=2)
 
@@ -1015,14 +1002,6 @@ def persist_watchlist(current_list: List[str], gas_url: str, gh_token: str, gh_r
         msg = f"Update watchlist: {len(clean_list)} items (changed: {trigger_code})"
         t_gh = threading.Thread(target=_sync_to_github_worker, args=(gh_token, gh_repo, json_str, msg), daemon=True)
         t_gh.start()
-
-    # 3. GASへの非同期送信 (複数銘柄にも対応)
-    if gas_url and gas_url.startswith("https://script.google.com") and trigger_code:
-        codes = [c.strip() for c in trigger_code.split(",") if c.strip()]
-        for c in codes:
-            is_w = (c in clean_list)
-            t_gas = threading.Thread(target=_send_to_gas_worker, args=(gas_url, c, is_w), daemon=True)
-            t_gas.start()
 
 # --- ユーザー設定（野村担保ローン借入額・日興貸株日数）永続化マネージャー ---
 DEFAULT_SETTINGS: Dict[str, Any] = {
@@ -1438,13 +1417,13 @@ def analyze_stocks(
             )
             if wait_days is not None:
                 if wait_days > 30:
-                    wait_label = f"🟢余裕({wait_days}日)"
+                    wait_label = f"🟢黒字(余裕{wait_days}日)"
                 elif wait_days > 0:
-                    wait_label = f"🟡残{wait_days}日"
+                    wait_label = f"🟢黒字(余力{wait_days}日)"
                 elif wait_days == 0:
                     wait_label = "⚠️損益±0"
                 else:
-                    wait_label = f"🚨赤字({abs(wait_days)}日超過)"
+                    wait_label = f"🚨赤字(あと{abs(wait_days)}日待機)"
 
         is_watch = (code in watchlist)
         c_trend = trend_map.get(str(code), {})
@@ -1618,8 +1597,8 @@ def main():
         nomura_daily = calc_nomura_daily_interest(loan_in, rate=rate_val)
         nomura_monthly = int(round(nomura_daily * 30.0))
 
-        # 経過日数と累計利息の計算 (本日まで / 現渡完了まで)
-        today_d = dt.date.today()
+        # 経過日数と累計利息の計算 (本日まで / 現渡完了まで - JST基準でUTCズレ防止)
+        today_d = get_now_jst().date()
         elapsed_days = max(1, (today_d - loan_date_in).days + 1)
         nomura_accrued = nomura_daily * elapsed_days
 
@@ -1693,7 +1672,6 @@ def main():
         st.markdown("### ⚙️ アプリ設定")
         nikko_th = st.number_input("日興 警戒閾値 (株)", value=10000, step=1000)
         annual_rate = st.number_input("貸株年率 (他社比較用)", value=0.014, step=0.001, format="%.3f")
-        gas_api_url = ""
 
         st.markdown("##### 💾 永続化ステータス")
         if gh_token:
@@ -1717,7 +1695,7 @@ def main():
     df_hist = normalize_history(raw_hist)
     df_mast = normalize_master(raw_mast)
 
-    # 監視リストのロード（ローカル + GitHub API + Sheets の多層フェイルオーバーで再起動時の初期化を完全防止）
+    # 監視リストのロード（ローカル + GitHub API の多層フェイルオーバーで再起動時の初期化を完全防止）
     if "watchlist" not in st.session_state:
         st.session_state["watchlist"] = load_initial_watchlist(df_mast=df_mast)
 
@@ -1746,7 +1724,7 @@ def main():
                 if c_clean and c_clean not in st.session_state["watchlist"]:
                     st.session_state["watchlist"].append(c_clean)
                     st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
-                    persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo, trigger_code=c_clean)
+                    persist_watchlist(st.session_state["watchlist"], gh_token, gh_repo, trigger_code=c_clean)
                     st.toast(f"✅ {c_clean} を監視リストに追加しました")
                     st.rerun()
                 elif c_clean in st.session_state["watchlist"]:
@@ -1767,7 +1745,7 @@ def main():
                         if st.button("❌", key=f"del_w_{wc}", help=f"{wc} を監視から解除"):
                             st.session_state["watchlist"].remove(wc)
                             st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
-                            persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo, trigger_code=wc)
+                            persist_watchlist(st.session_state["watchlist"], gh_token, gh_repo, trigger_code=wc)
                             st.toast(f"🗑️ {wc} を解除しました")
                             st.rerun()
 
@@ -2166,31 +2144,14 @@ def main():
                 disabled=[c for c in df_table.columns if c != "⭐"]
             )
 
-            # --- 確実なコードキー差分検知 (Streamlit の内部 edited_rows を直接解析) ---
-            editor_state = st.session_state.get(editor_key, {})
-            edited_rows = editor_state.get("edited_rows", {}) if isinstance(editor_state, dict) else {}
-
+            # --- 確実なコードキー差分検知 (列ヘッダーソート時の行番号インデックスズレを完全根絶) ---
+            orig_map = dict(zip(df_table["コード"], df_table["⭐"]))
+            new_map = dict(zip(edited_table["コード"], edited_table["⭐"]))
             changed_items = []
-            if edited_rows:
-                # ユーザーが実際にクリック・編集した行のみをピンポイントで取得（他の行の誤検知ゼロ）
-                for row_idx_str, changes in edited_rows.items():
-                    if "⭐" in changes:
-                        try:
-                            idx = int(row_idx_str)
-                            if 0 <= idx < len(df_table):
-                                c = str(df_table.iloc[idx]["コード"])
-                                new_val = bool(changes["⭐"])
-                                changed_items.append((c, new_val))
-                        except (ValueError, IndexError):
-                            pass
-            else:
-                # フォールバック: 全体マップ比較（念のため）
-                orig_map = dict(zip(df_table["コード"], df_table["⭐"]))
-                new_map = dict(zip(edited_table["コード"], edited_table["⭐"]))
-                for c, new_val in new_map.items():
-                    old_val = orig_map.get(c)
-                    if old_val is not None and old_val != new_val:
-                        changed_items.append((c, new_val))
+            for c, new_val in new_map.items():
+                old_val = orig_map.get(c)
+                if old_val is not None and old_val != new_val:
+                    changed_items.append((c, bool(new_val)))
 
             if changed_items:
                 changed_codes = []
@@ -2206,13 +2167,12 @@ def main():
                     # ★コミット多重起動・競合コンフリクト根絶: ループ外で1回だけまとめて永続化を実行
                     persist_watchlist(
                         st.session_state["watchlist"],
-                        gas_api_url,
                         gh_token,
                         gh_repo,
                         trigger_code=",".join(changed_codes)
                     )
 
-                # ★最重要: エディタキーのバージョンを上げて前回の編集キャッシュ（行番号）を完全破棄！
+                # ★最重要: エディタキーのバージョンを上げて前回の編集キャッシュを完全リフレッシュ！
                 st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
                 # 即時再描画（これで連鎖ループは100%完全に防がれる！）
                 st.rerun()
