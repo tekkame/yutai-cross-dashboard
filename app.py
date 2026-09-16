@@ -739,9 +739,21 @@ def main():
     df_hist = normalize_history(raw_hist)
     df_mast = normalize_master(raw_mast)
 
-    # 初回アクセス時に監視リストをロード（SessionStateに保持）
+    # 監視リストのロード＆スプレッドシート変更の自動合流
     if "watchlist" not in st.session_state:
         st.session_state["watchlist"] = load_initial_watchlist(df_mast)
+    else:
+        # スプレッドシート側で後からTRUEにされた銘柄があれば自動でマージ
+        if df_mast is not None and not df_mast.empty:
+            c_cols = [c for c in ["コード", "code", "銘柄コード"] if c in df_mast.columns]
+            if c_cols:
+                c_col = c_cols[0]
+                w_cols = [c for c in ["監視", "watch", "目標", "target"] if c in df_mast.columns]
+                for wc in w_cols:
+                    watched = df_mast[df_mast[wc].astype(str).str.upper().isin(["TRUE", "1"])][c_col].dropna().tolist()
+                    for sw in [fmt_code(c) for c in watched]:
+                        if sw and sw not in st.session_state["watchlist"]:
+                            st.session_state["watchlist"].append(sw)
 
     df_analyzed, stats, all_timestamps = analyze_stocks(
         df_hist, df_mast,
