@@ -432,15 +432,17 @@ def trigger_github_workflow(token: str, repo: str, ref: str = "main") -> Tuple[b
 # ============================================================
 # 5. 監視リスト（⭐ピン留め）永続化マネージャー
 # ============================================================
+DEFAULT_WATCHLIST = ["3088", "3167", "4751", "6412", "8052", "8173"]
+
 def load_watchlist_from_disk() -> List[str]:
-    """ローカル/リポジトリ同梱の watchlist.json から読み込み"""
+    """ローカル/リポジトリ同梱の watchlist.json から読み込み（厳密にユーザー指定の銘柄のみ）"""
     if WATCHLIST_FILE.exists():
         try:
             codes = json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
-            if isinstance(codes, list):
+            if isinstance(codes, list) and codes:
                 return [fmt_code(c) for c in codes if c]
         except Exception: pass
-    return ["9831", "8136", "7513", "3679", "7458", "3778", "7419", "3844", "3167", "5262", "9201", "9202"]
+    return DEFAULT_WATCHLIST.copy()
 
 def save_watchlist_to_disk(codes: List[str]):
     """ローカルディスクへ即座に書き込み"""
@@ -449,20 +451,8 @@ def save_watchlist_to_disk(codes: List[str]):
     WATCHLIST_FILE.write_text(json.dumps(clean_codes, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def load_initial_watchlist(df_mast: Optional[pd.DataFrame] = None) -> List[str]:
-    """スプレッドシートフラグ ＋ ローカル/Git JSON を統合して初期ロード"""
-    w_sheet = []
-    if df_mast is not None and not df_mast.empty:
-        c_cols = [c for c in ["コード", "code", "銘柄コード"] if c in df_mast.columns]
-        if c_cols:
-            c_col = c_cols[0]
-            w_cols = [c for c in ["監視", "watch", "目標", "target"] if c in df_mast.columns]
-            for wc in w_cols:
-                watched = df_mast[df_mast[wc].astype(str).str.upper().isin(["TRUE", "1"])][c_col].dropna().tolist()
-                w_sheet.extend([fmt_code(c) for c in watched])
-
-    w_local = load_watchlist_from_disk()
-    final_w = list(dict.fromkeys(w_sheet + w_local)) if (w_sheet or w_local) else []
-    return final_w
+    """監視リストをロード（watchlist.json の内容を絶対正とし、余分な過去フラグは自動混入させない）"""
+    return load_watchlist_from_disk()
 
 # --- 非同期同期ワーカー (GAS ＆ GitHub API) ---
 def _send_to_gas_worker(gas_url: str, code: str, is_watched: bool):
@@ -906,10 +896,18 @@ def main():
         else:
             st.info("ℹ️ ローカル保存モード（SecretsにToken登録でクラウド自動保存可）")
 
-        if st.button("📥 監視リストを再読込", use_container_width=True):
-            st.session_state["watchlist"] = load_watchlist_from_disk()
-            st.toast("監視リストを再読込しました")
-            st.rerun()
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("📥 再読込", use_container_width=True):
+                st.session_state["watchlist"] = load_watchlist_from_disk()
+                st.toast("監視リストを再読込しました")
+                st.rerun()
+        with col_btn2:
+            if st.button("🔄 6銘柄リセット", use_container_width=True):
+                st.session_state["watchlist"] = DEFAULT_WATCHLIST.copy()
+                persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo)
+                st.toast("指定6銘柄に初期化リセットしました")
+                st.rerun()
 
         st.caption(f"App Version: {APP_VERSION}")
 
@@ -921,21 +919,9 @@ def main():
     df_hist = normalize_history(raw_hist)
     df_mast = normalize_master(raw_mast)
 
-    # 監視リストのロード＆スプレッドシート変更の自動合流
+    # 監視リストのロード（watchlist.json を唯一の正とし、余分な過去フラグは合流させない）
     if "watchlist" not in st.session_state:
-        st.session_state["watchlist"] = load_initial_watchlist(df_mast)
-    else:
-        # スプレッドシート側で後からTRUEにされた銘柄があれば自動でマージ
-        if df_mast is not None and not df_mast.empty:
-            c_cols = [c for c in ["コード", "code", "銘柄コード"] if c in df_mast.columns]
-            if c_cols:
-                c_col = c_cols[0]
-                w_cols = [c for c in ["監視", "watch", "目標", "target"] if c in df_mast.columns]
-                for wc in w_cols:
-                    watched = df_mast[df_mast[wc].astype(str).str.upper().isin(["TRUE", "1"])][c_col].dropna().tolist()
-                    for sw in [fmt_code(c) for c in watched]:
-                        if sw and sw not in st.session_state["watchlist"]:
-                            st.session_state["watchlist"].append(sw)
+        st.session_state["watchlist"] = load_initial_watchlist()
 
     df_analyzed, stats, all_timestamps = analyze_stocks(
         df_hist, df_mast,
