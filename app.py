@@ -205,7 +205,7 @@ DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v10.0 (Acute Drop Alerts & Compact Custom Layout)"
+APP_VERSION = "v10.1 (On-demand Direct Scraping & Daily Snapshot Trends)"
 
 # ============================================================
 # 3. 堅牢なフォーマッター
@@ -325,8 +325,71 @@ def get_github_token() -> str:
     return ""
 
 # ============================================================
-# 4. GitHub Actions 1クリック起動エンジン
+# 4. アプリ内直接スクレイピング ＆ 日時基準（Daily Snapshot）抽出
 # ============================================================
+def run_direct_scrape() -> Tuple[bool, str]:
+    """Streamlit アプリ内で直接 Gokigen API ＆ Routine優待データをスクレイピングして即時更新"""
+    try:
+        import main as scraper_main
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        ret = scraper_main.run(
+            dry_run=True,
+            out_dir=str(DATA_DIR),
+            rights_arg=None,
+            kengi_arg=None,
+            watch_expr=None
+        )
+        if ret == 0:
+            st.cache_data.clear()
+            return True, "最新在庫データを直接スクレイピング取得しました！"
+        return False, f"スクレイピング処理でエラーが発生しました (code: {ret})"
+    except Exception as e:
+        return False, f"スクレイピング実行例外: {e}"
+
+def extract_meaningful_snapshots(df_hist: pd.DataFrame) -> List[Tuple[str, str]]:
+    """手動・自動更新のタイミングの不揃いに左右されず、意味のある日付基準（Daily Snapshot）を抽出。
+    各過去日付（昨日以前）: その日の最終取得時点を代表値として1件採用。
+    本日（最新日）: 直前値と最新値を採用。
+    戻り値: [(timestamp, "M/D"), ...] のリスト (時系列昇順)
+    """
+    if df_hist is None or df_hist.empty or "timestamp" not in df_hist.columns:
+        return []
+
+    d = df_hist.dropna(subset=["timestamp"]).copy()
+    if "dt" not in d.columns:
+        d["dt"] = pd.to_datetime(d["timestamp"], errors="coerce")
+    d = d.dropna(subset=["dt"]).sort_values(by="dt", ascending=True)
+
+    d["date_str"] = d["dt"].dt.strftime("%Y-%m-%d")
+    unique_dates = d["date_str"].unique().tolist()
+    if not unique_dates:
+        return []
+
+    latest_date = unique_dates[-1]
+    selected: List[Tuple[str, str]] = []
+
+    # 過去日付 (直近最大2日分): 各日の最終スナップショットを採用
+    past_dates = [dt_str for dt_str in unique_dates if dt_str != latest_date]
+    for dt_str in past_dates[-2:]:
+        sub = d[d["date_str"] == dt_str]
+        last_row = sub.iloc[-1]
+        ts = last_row["timestamp"]
+        label = last_row["dt"].strftime("%m/%d").lstrip("0").replace("/0", "/")
+        selected.append((ts, label))
+
+    # 本日 (最新日):
+    today_sub = d[d["date_str"] == latest_date]
+    today_ts_list = today_sub["timestamp"].unique().tolist()
+    if len(today_ts_list) >= 2:
+        prev_today = today_sub[today_sub["timestamp"] == today_ts_list[-2]].iloc[-1]
+        selected.append((today_ts_list[-2], prev_today["dt"].strftime("%H:%M")))
+
+    # 本日最新
+    last_today = today_sub[today_sub["timestamp"] == today_ts_list[-1]].iloc[-1]
+    selected.append((today_ts_list[-1], "本日" if past_dates else "最新"))
+
+    return selected
+
 def trigger_github_workflow(token: str, repo: str, ref: str = "main") -> Tuple[bool, str]:
     if not token or not repo:
         return False, "GITHUB_TOKEN または GITHUB_REPO が設定されていません。"
@@ -413,11 +476,11 @@ def _send_to_gas_worker(gas_url: str, code: str, is_watched: bool):
     except Exception:
         pass
 
-def _sync_to_github_worker(token: str, repo: str, content_str: str, commit_msg: str):
+def _sync_to_github_worker(token: str, repo: str, content_str: str, commit_msg: str, file_path: str = "data/watchlist.json"):
     """Streamlit Cloud 上での変更を GitHub リポジトリへ直接コミットして永久保持"""
     if not token or not repo: return
     try:
-        url = f"https://api.github.com/repos/{repo}/contents/data/watchlist.json"
+        url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
@@ -601,29 +664,56 @@ def analyze_stocks(
 
     results: List[Dict[str, Any]] = []
 
-    # 直近3〜4件のスナップショットから銘柄別の推移マップを事前計算
+    # 日付基準（Daily Snapshot）のスナップショット一覧 [(timestamp, "M/D"), ...] を抽出
+    meaningful_snaps = extract_meaningful_snapshots(df_hist)
+    snap_ts_list = [ts for ts, _ in meaningful_snaps]
+    snap_label_map = {ts: lbl for ts, lbl in meaningful_snaps}
+
+    # 前日（直近の別日）の代表スナップショットを特定（前日比計算用）
+    prev_day_ts = None
+    if len(meaningful_snaps) >= 2:
+        # 最新の直前にある代表スナップショット（前日最終値または本日前回値）
+        prev_day_ts = meaningful_snaps[-2][0]
+    elif prev_ts:
+        prev_day_ts = prev_ts
+
+    df_prev_day = df_hist[df_hist["timestamp"] == prev_day_ts].copy() if prev_day_ts else pd.DataFrame()
+    prev_day_map = {r["code"]: r for _, r in df_prev_day.iterrows()} if not df_prev_day.empty else {}
+
+    # 日付ラベル付きの推移マップを事前計算
     trend_map: Dict[str, Dict[str, str]] = {}
-    recent_ts_list = all_timestamps[-4:] if len(all_timestamps) >= 4 else all_timestamps
-    if recent_ts_list and not df_hist.empty:
-        df_recent = df_hist[df_hist["timestamp"].isin(recent_ts_list)].copy()
-        for c_grp, g_df in df_recent.groupby("code"):
+    if snap_ts_list and not df_hist.empty:
+        df_snaps = df_hist[df_hist["timestamp"].isin(snap_ts_list)].copy()
+        for c_grp, g_df in df_snaps.groupby("code"):
             g_sorted = g_df.sort_values(by="dt", ascending=True) if "dt" in g_df.columns else g_df
-            n_vals = [fmt_qty(to_float(v)) for v in g_sorted["nikko"].tolist()]
-            s_raw = g_sorted["rtn_sbi"] if "rtn_sbi" in g_sorted.columns else (g_sorted["sbi"] if "sbi" in g_sorted.columns else [])
-            s_vals = [fmt_signal(v) for v in s_raw.tolist()]
+            g_unique = g_sorted.drop_duplicates(subset=["timestamp"])
             
-            n_trend_str = "→".join(n_vals[-3:]) if n_vals else "―"
-            s_trend_str = "→".join(s_vals[-3:]) if s_vals else "―"
+            n_parts = []
+            s_parts = []
+            for _, r_snap in g_unique.iterrows():
+                ts = r_snap["timestamp"]
+                lbl = snap_label_map.get(ts, "")
+                n_q = fmt_qty(to_float(r_snap.get("nikko")))
+                s_raw = r_snap.get("rtn_sbi") or r_snap.get("sbi") or "―"
+                s_q = fmt_signal(str(s_raw))
+                n_parts.append(f"{lbl}:{n_q}")
+                s_parts.append(f"{lbl}:{s_q}")
+
+            n_trend_str = "→".join(n_parts[-3:]) if n_parts else "―"
+            s_trend_str = "→".join(s_parts[-3:]) if s_parts else "―"
             trend_map[str(c_grp)] = {
                 "nikko": n_trend_str,
                 "sbi": s_trend_str,
-                "combined": f"日興:{n_trend_str} | SBI:{s_trend_str}"
+                "combined": f"日興[{n_trend_str}] | SBI[{s_trend_str}]"
             }
 
     for _, row in df_latest.iterrows():
         code = row.get("code", "")
         name = row.get("name", "")
         prev_row = prev_map.get(code)
+        prev_day_row = prev_day_map.get(code)
+        if prev_day_row is None:
+            prev_day_row = prev_row
         m_row = mast_map.get(code, {})
 
         nikko_now = to_float(row.get("nikko"))
@@ -635,10 +725,11 @@ def analyze_stocks(
 
         gmo_now = str(row.get("gmo") or m_row.get("gmo_limit") or "―").strip()
 
-        nikko_prev = to_float(prev_row.get("nikko")) if prev_row is not None else None
-        rakuten_prev = to_float(prev_row.get("rakuten")) if prev_row is not None else None
+        # 前日（または前回）との比較
+        nikko_prev = to_float(prev_day_row.get("nikko")) if prev_day_row is not None else None
+        rakuten_prev = to_float(prev_day_row.get("rakuten")) if prev_day_row is not None else None
 
-        sbi_prev_raw = str(prev_row.get("rtn_sbi") or prev_row.get("sbi") or "―").strip() if prev_row is not None else "―"
+        sbi_prev_raw = str(prev_day_row.get("rtn_sbi") or prev_day_row.get("sbi") or "―").strip() if prev_day_row is not None else "―"
         sbi_prev = fmt_signal(sbi_prev_raw)
 
         nikko_diff = (nikko_now - nikko_prev) if (nikko_now is not None and nikko_prev is not None) else None
@@ -646,7 +737,7 @@ def analyze_stocks(
         # --- SBI 急変・悪化検知 ---
         is_sbi_sudden_drop = False
         sbi_alert_tag = ""
-        if prev_ts and sbi_prev != "―" and sbi_now != "―":
+        if sbi_prev != "―" and sbi_now != "―":
             if sbi_prev == "◎" and sbi_now == "▲":
                 sbi_change = "🚨急変(◎→▲)"
                 sbi_alert_tag = "🚨◎→▲"
@@ -958,8 +1049,28 @@ def main():
             st.rerun()
     with c_f7:
         if st.button("🚀 最新取得", use_container_width=True):
-            ok, msg = trigger_github_workflow(token=gh_token, repo=gh_repo)
-            st.toast(msg)
+            with st.spinner("⚡ 最新在庫データを直接スクレイピング中 (数秒)..."):
+                ok, msg = run_direct_scrape()
+                if ok:
+                    st.toast("✅ " + msg)
+                    # もしGitHub Tokenがあれば非同期でGitHubへも自動プッシュ
+                    if gh_token and gh_repo:
+                        try:
+                            # 最新CSVをGitHubへ自動コミット
+                            latest_csvs = sorted(DATA_DIR.glob("history_*.csv"))
+                            if latest_csvs:
+                                l_csv = latest_csvs[-1]
+                                content_b64 = base64.b64encode(l_csv.read_bytes()).decode("utf-8")
+                                c_msg = f"Auto update stock data via Web UI: {l_csv.name}"
+                                threading.Thread(target=_sync_to_github_worker, args=(gh_token, gh_repo, l_csv.read_text(encoding="utf-8-sig"), c_msg, f"data/{l_csv.name}"), daemon=True).start()
+                        except Exception: pass
+                    st.rerun()
+                else:
+                    ok_gh, msg_gh = trigger_github_workflow(token=gh_token, repo=gh_repo)
+                    if ok_gh:
+                        st.toast(f"ℹ️ {msg_gh}")
+                    else:
+                        st.error(f"取得エラー: {msg}")
 
     # フィルタリング
     filtered_df = df_analyzed.copy()
