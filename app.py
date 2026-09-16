@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 app.py - 株主優待クロス在庫トラッカー ＆ 実戦意思決定ダッシュボード
-(Target Highlight Version - Multi-Layer Cloud Persistence: Sheets Sync + Git Sync)
-- 🎯 取得目標銘柄ハイライト・パネル（拘束資金合計・見込純利益計・対象銘柄一覧）
-- ⚡ 実戦ボード data_editor による「🎯 目標」「⭐ 監視」チェックボックス直接操作
-- 💾 Streamlit Cloud 完全対応の多層永続化（Session + Local/Git JSON + GAS/Sheets Sync）
+【監視銘柄ピン留め完全一本化 ＆ 確実な多層クラウド永続化版】
+- ⭐ 監視リスト ＝ ピン留めリスト に完全一本化（目的の重複を解消）
+- 🎯 画面上部に「⭐ 監視・目標銘柄ハイライト」（拘束資金合計・見込純利益計・対象カード一覧）
+- ⚡ 実戦ボード data_editor による「⭐」チェックボックス直接操作（辞書キー比較で確実に検知 ＆ 即座に画面反映）
+- 💾 Streamlit Cloud 完全対応の多層永続化（Session + Local File + GitHub API Commit + GAS/Sheets Sync）
 - 🗓 日時別 在庫推移マトリクス ＆ 📈 日興在庫時系列推移チャート
 - 🚀 GitHub Actions 1クリックオンデマンド・スクレイピング起動
 """
@@ -99,7 +100,7 @@ html, body, [class*="css"] {
 .tag-purple { background: #581c87; color: #f0abfc; border: 1px solid #a855f7; }
 .tag-gray   { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
 
-/* ターゲットハイライト用CSS */
+/* 監視ハイライト用CSS */
 .target-highlight-panel {
     background: linear-gradient(145deg, #1e293b 0%, #0f172a 100%);
     border: 1px solid #fbbf24;
@@ -162,65 +163,6 @@ html, body, [class*="css"] {
 .target-profit { font-family: 'JetBrains Mono', monospace; text-align: right; color: #86efac; font-weight: 600; }
 .target-yutai { color: #cbd5e1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
 
-.alert-banner-danger {
-    background: #450a0a;
-    border: 1px solid #dc2626;
-    color: #fecaca;
-    padding: 0.35rem 0.75rem;
-    border-radius: 6px;
-    margin-bottom: 0.35rem;
-    font-size: 12px;
-    font-weight: 600;
-}
-
-.alert-banner-safe {
-    background: #022c22;
-    border: 1px solid #059669;
-    color: #a7f3d0;
-    padding: 0.25rem 0.65rem;
-    border-radius: 6px;
-    margin-bottom: 0.35rem;
-    font-size: 11.5px;
-}
-
-.kpi-row {
-    display: flex;
-    gap: 0.35rem;
-    margin-bottom: 0.4rem;
-    flex-wrap: wrap;
-}
-
-.kpi-card {
-    flex: 1;
-    min-width: 110px;
-    background: #ffffff;
-    border: 1px solid #cbd5e1;
-    border-radius: 5px;
-    padding: 0.25rem 0.55rem;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-
-@media (prefers-color-scheme: dark) {
-    .kpi-card {
-        background: #111827;
-        border-color: #374151;
-    }
-}
-
-.kpi-title {
-    font-size: 11px;
-    font-weight: 600;
-    color: #64748b;
-}
-
-.kpi-num {
-    font-size: 14px;
-    font-weight: 700;
-    font-family: 'JetBrains Mono', monospace;
-}
-
 div[data-testid="stVerticalBlock"] > div {
     gap: 0.2rem !important;
 }
@@ -265,10 +207,9 @@ st.markdown(ULTRA_COMPACT_CSS, unsafe_allow_html=True)
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
-TARGETLIST_FILE = DATA_DIR / "targetlist.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v8.5 (Target Highlight & Multi-Layer Cloud Persistence)"
+APP_VERSION = "v9.0 (Unified Watchlist & Verified Cloud Persistence)"
 
 # ============================================================
 # 3. 堅牢なフォーマッター
@@ -325,6 +266,21 @@ def fmt_signal(v: Any) -> str:
     if s in ("0", "0.0", "×", "✕"): return "×"
     return s
 
+def get_github_token() -> str:
+    """Streamlit Secrets, 環境変数, ローカルファイルから安全にGitHubトークンを取得"""
+    t = st.secrets.get("GITHUB_TOKEN", "")
+    if t: return t
+    t = os.environ.get("GITHUB_TOKEN", "")
+    if t: return t
+    for p in [
+        BASE_DIR / ".github_token",
+        Path("C:/Users/tekka/Desktop/antigravity/mitsubishi_hems/.github_token")
+    ]:
+        if p.exists() and p.is_file():
+            val = p.read_text(encoding="utf-8").strip()
+            if val: return val
+    return ""
+
 # ============================================================
 # 4. GitHub Actions 1クリック起動エンジン
 # ============================================================
@@ -368,9 +324,10 @@ def trigger_github_workflow(token: str, repo: str, ref: str = "main") -> Tuple[b
         return False, f"送信エラー: {e}"
 
 # ============================================================
-# 5. リスト永続化マネージャー (Local JSON + GitHub API + GAS)
+# 5. 監視リスト（⭐ピン留め）永続化マネージャー
 # ============================================================
-def load_watchlist() -> List[str]:
+def load_watchlist_from_disk() -> List[str]:
+    """ローカル/リポジトリ同梱の watchlist.json から読み込み"""
     if WATCHLIST_FILE.exists():
         try:
             codes = json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
@@ -379,61 +336,32 @@ def load_watchlist() -> List[str]:
         except Exception: pass
     return ["9831", "8136", "7513", "3679", "7458", "3778", "7419", "3844", "3167", "5262", "9201", "9202"]
 
-def load_targetlist() -> List[str]:
-    if TARGETLIST_FILE.exists():
-        try:
-            codes = json.loads(TARGETLIST_FILE.read_text(encoding="utf-8"))
-            if isinstance(codes, list):
-                return [fmt_code(c) for c in codes if c]
-        except Exception: pass
-    return []
-
-def save_watchlist_local(codes: List[str]):
+def save_watchlist_to_disk(codes: List[str]):
+    """ローカルディスクへ即座に書き込み"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     clean_codes = sorted(list(set(fmt_code(c) for c in codes if c)))
     WATCHLIST_FILE.write_text(json.dumps(clean_codes, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def save_targetlist_local(codes: List[str]):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    clean_codes = sorted(list(set(fmt_code(c) for c in codes if c)))
-    TARGETLIST_FILE.write_text(json.dumps(clean_codes, ensure_ascii=False, indent=2), encoding="utf-8")
-
-def load_lists_from_master(df_mast: Optional[pd.DataFrame] = None) -> Tuple[List[str], List[str]]:
-    """Google Sheets のマスターデータから監視・目標フラグを取得"""
-    watchlist, targetlist = [], []
+def load_initial_watchlist(df_mast: Optional[pd.DataFrame] = None) -> List[str]:
+    """スプレッドシートフラグ ＋ ローカル/Git JSON を統合して初期ロード"""
+    w_sheet = []
     if df_mast is not None and not df_mast.empty:
         c_cols = [c for c in ["コード", "code", "銘柄コード"] if c in df_mast.columns]
         if c_cols:
             c_col = c_cols[0]
-            w_cols = [c for c in ["監視", "watch", "sheet_watch"] if c in df_mast.columns]
-            if w_cols:
-                watched = df_mast[df_mast[w_cols[0]].astype(str).str.upper().isin(["TRUE", "1"])][c_col].dropna().tolist()
-                watchlist = [fmt_code(c) for c in watched]
+            w_cols = [c for c in ["監視", "watch", "目標", "target"] if c in df_mast.columns]
+            for wc in w_cols:
+                watched = df_mast[df_mast[wc].astype(str).str.upper().isin(["TRUE", "1"])][c_col].dropna().tolist()
+                w_sheet.extend([fmt_code(c) for c in watched])
 
-            t_cols = [c for c in ["目標", "target"] if c in df_mast.columns]
-            if t_cols:
-                targeted = df_mast[df_mast[t_cols[0]].astype(str).str.upper().isin(["TRUE", "1"])][c_col].dropna().tolist()
-                targetlist = [fmt_code(c) for c in targeted]
-    return watchlist, targetlist
-
-def load_initial_lists(df_mast: Optional[pd.DataFrame] = None) -> Tuple[List[str], List[str]]:
-    """スプレッドシートフラグ ＋ ローカル/Git JSON を統合して初回ロード"""
-    w_sheet, t_sheet = load_lists_from_master(df_mast)
-    w_local = load_watchlist()
-    t_local = load_targetlist()
-
+    w_local = load_watchlist_from_disk()
     final_w = list(dict.fromkeys(w_sheet + w_local)) if (w_sheet or w_local) else []
-    final_t = list(dict.fromkeys(t_sheet + t_local)) if (t_sheet or t_local) else []
-    return final_w, final_t
+    return final_w
 
 # --- 非同期同期ワーカー (GAS ＆ GitHub API) ---
-def _send_to_gas_worker(gas_url: str, code: str, flag_type: str, flag_value: bool):
+def _send_to_gas_worker(gas_url: str, code: str, is_watched: bool):
     try:
-        payload_dict = {"code": code, "status": "未確保"}
-        if flag_type == "watch": payload_dict["watch"] = flag_value
-        elif flag_type == "target": payload_dict["target"] = flag_value
-
-        payload = json.dumps(payload_dict).encode("utf-8")
+        payload = json.dumps({"code": code, "watch": is_watched, "status": "未確保"}).encode("utf-8")
         req = urllib.request.Request(
             gas_url, data=payload, headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}, method="POST"
         )
@@ -442,11 +370,11 @@ def _send_to_gas_worker(gas_url: str, code: str, flag_type: str, flag_value: boo
     except Exception:
         pass
 
-def _sync_to_github_worker(token: str, repo: str, filepath: str, content_str: str, commit_msg: str):
+def _sync_to_github_worker(token: str, repo: str, content_str: str, commit_msg: str):
     """Streamlit Cloud 上での変更を GitHub リポジトリへ直接コミットして永久保持"""
     if not token or not repo: return
     try:
-        url = f"https://api.github.com/repos/{repo}/contents/{filepath}"
+        url = f"https://api.github.com/repos/{repo}/contents/data/watchlist.json"
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
@@ -475,31 +403,25 @@ def _sync_to_github_worker(token: str, repo: str, filepath: str, content_str: st
     except Exception:
         pass
 
-def sync_flag_multi_channel(code: str, flag_type: str, flag_value: bool,
-                            current_list: List[str], gas_url: str,
-                            gh_token: str, gh_repo: str):
-    """ローカル保存 + GAS同期 + GitHubリポジトリ永続化を同時に実行"""
+def persist_watchlist(current_list: List[str], gas_url: str, gh_token: str, gh_repo: str, trigger_code: str = ""):
+    """①ローカル保存 + ②GitHubリポジトリ永続化 + ③GAS同期 を多層実行"""
     clean_list = sorted(list(set(fmt_code(c) for c in current_list if c)))
     json_str = json.dumps(clean_list, ensure_ascii=False, indent=2)
 
-    if flag_type == "watch":
-        save_watchlist_local(clean_list)
-        fpath = "data/watchlist.json"
-        msg = f"Update watchlist: {code} ({flag_value}) from Streamlit"
-    else:
-        save_targetlist_local(clean_list)
-        fpath = "data/targetlist.json"
-        msg = f"Update targetlist: {code} ({flag_value}) from Streamlit"
+    # 1. ローカル保存 (即時)
+    save_watchlist_to_disk(clean_list)
 
-    # GASへの非同期送信
-    if gas_url and gas_url.startswith("https://script.google.com"):
-        t_gas = threading.Thread(target=_send_to_gas_worker, args=(gas_url, code, flag_type, flag_value), daemon=True)
-        t_gas.start()
-
-    # GitHubへの非同期コミット (Streamlit Cloudスリープ復帰対策)
+    # 2. GitHubへの非同期コミット (Streamlit Cloud再起動対策)
     if gh_token and gh_repo:
-        t_gh = threading.Thread(target=_sync_to_github_worker, args=(gh_token, gh_repo, fpath, json_str, msg), daemon=True)
+        msg = f"Update watchlist: {len(clean_list)} items (changed: {trigger_code})"
+        t_gh = threading.Thread(target=_sync_to_github_worker, args=(gh_token, gh_repo, json_str, msg), daemon=True)
         t_gh.start()
+
+    # 3. GASへの非同期送信
+    if gas_url and gas_url.startswith("https://script.google.com") and trigger_code:
+        is_w = (trigger_code in clean_list)
+        t_gas = threading.Thread(target=_send_to_gas_worker, args=(gas_url, trigger_code, is_w), daemon=True)
+        t_gas.start()
 
 # ============================================================
 # 6. データローダー (ローカル最新CSV + Google Sheets ハイブリッド)
@@ -618,7 +540,6 @@ def analyze_stocks(
     df_hist: pd.DataFrame,
     df_mast: pd.DataFrame,
     watchlist: List[str],
-    targetlist: List[str],
     nikko_th: float = 10000.0,
     annual_rate: float = 0.014,
 ) -> Tuple[pd.DataFrame, Dict[str, Any], List[str]]:
@@ -729,13 +650,11 @@ def analyze_stocks(
                         limit_days_int = int(round(yutai_val / daily_cost))
             except Exception: pass
 
-        is_target = (code in targetlist)
         is_watch = (code in watchlist)
 
         results.append({
-            "target": is_target,
-            "target_rank": 0 if is_target else 1,
             "watch": is_watch,
+            "watch_rank": 0 if is_watch else 1,  # 監視中を最優先ピン留め
             "code": code,
             "name": name,
             "stock_price": stock_price,
@@ -771,7 +690,6 @@ def analyze_stocks(
         "sbi_drop_count": sum(1 for r in results if r["is_sbi_drop"]),
         "refill_count": sum(1 for r in results if r["is_refill"]),
         "watch_count": sum(1 for r in results if r["watch"]),
-        "target_count": sum(1 for r in results if r["target"]),
         "empty_count": sum(1 for r in results if r["signal"] == "⚪ 枯渇"),
     }
     return df_res, stats, all_timestamps
@@ -780,16 +698,28 @@ def analyze_stocks(
 # 8. メインUI
 # ============================================================
 def main():
-    gh_token = st.secrets.get("GITHUB_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
+    gh_token = get_github_token()
     gh_repo = st.secrets.get("GITHUB_REPO", os.environ.get("GITHUB_REPO", "tekkame/yutai-cross-dashboard"))
 
     with st.sidebar:
-        st.markdown("### ⚙️ 設定")
+        st.markdown("### ⚙️ 設定 ＆ 監視リスト管理")
         sheet_id = st.text_input("スプレッドシートID", value=DEFAULT_SPREADSHEET_ID)
         gas_api_url = st.text_input("GAS URL", value=DEFAULT_GAS_API_URL)
         nikko_th = st.number_input("日興 警戒閾値 (株)", value=10000, step=1000)
         annual_rate = st.number_input("貸株年率", value=0.014, step=0.001, format="%.3f")
+
         st.markdown("---")
+        st.markdown("##### 💾 永続化ステータス")
+        if gh_token:
+            st.success("✅ GitHub Token 連携中（クラウド自動保存OK）")
+        else:
+            st.info("ℹ️ ローカル保存モード（SecretsにToken登録でクラウド自動保存可）")
+
+        if st.button("📥 監視リストを再読込", use_container_width=True):
+            st.session_state["watchlist"] = load_watchlist_from_disk()
+            st.toast("監視リストを再読込しました")
+            st.rerun()
+
         st.caption(f"App Version: {APP_VERSION}")
 
     raw_hist, raw_mast, data_source_msg = load_all_combined_data(spreadsheet_id=sheet_id)
@@ -800,17 +730,13 @@ def main():
     df_hist = normalize_history(raw_hist)
     df_mast = normalize_master(raw_mast)
 
-    # 初回アクセス時に Google Sheets ＆ ローカル/Git JSON からリストを初期化
-    if "lists_initialized" not in st.session_state:
-        init_w, init_t = load_initial_lists(df_mast)
-        st.session_state["watchlist"] = init_w
-        st.session_state["targetlist"] = init_t
-        st.session_state["lists_initialized"] = True
+    # 初回アクセス時に監視リストをロード（SessionStateに保持）
+    if "watchlist" not in st.session_state:
+        st.session_state["watchlist"] = load_initial_watchlist(df_mast)
 
     df_analyzed, stats, all_timestamps = analyze_stocks(
         df_hist, df_mast,
         watchlist=st.session_state["watchlist"],
-        targetlist=st.session_state["targetlist"],
         nikko_th=nikko_th,
         annual_rate=annual_rate
     )
@@ -822,20 +748,20 @@ def main():
         <div class="status-tags">
             <span class="tag tag-green">{data_source_msg}</span>
             <span class="tag tag-blue">最新取得: {stats.get('latest_ts', '―')}</span>
-            <span class="tag tag-amber">目標: {stats.get('target_count', 0)}銘柄</span>
-            <span class="tag tag-purple">監視: {stats.get('watch_count', 0)}銘柄</span>
+            <span class="tag tag-amber">⭐ 監視中: {stats.get('watch_count', 0)}銘柄</span>
+            <span class="tag tag-red">今夜確保: {stats.get('tonight_count', 0)}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
     # ----------------------------------------------------
-    # ★ 取得目標ハイライト・パネル (Target Highlight)
+    # ★ 監視・目標銘柄ハイライト・パネル (⭐ピン留め一覧)
     # ----------------------------------------------------
-    target_df = df_analyzed[df_analyzed["target"] == True].copy()
+    watch_df = df_analyzed[df_analyzed["watch"] == True].copy()
 
-    if not target_df.empty:
-        total_funds = target_df[target_df["funds_yen"] < 99999990]["funds_yen"].sum()
-        valid_profits = target_df["net_profit"].dropna()
+    if not watch_df.empty:
+        total_funds = watch_df[watch_df["funds_yen"] < 99999990]["funds_yen"].sum()
+        valid_profits = watch_df["net_profit"].dropna()
         total_profit = valid_profits.sum() if not valid_profits.empty else None
 
         funds_disp = f"¥{int(total_funds):,}" if total_funds > 0 else "―"
@@ -844,7 +770,7 @@ def main():
         html_panel = f"""
         <div class="target-highlight-panel">
             <div class="target-header">
-                🎯 今月の取得目標銘柄 ({len(target_df)}件)
+                ⭐ 監視・目標銘柄ハイライト ({len(watch_df)}件ピン留め中)
             </div>
             <div class="target-summary">
                 <div class="target-summary-item"><span class="label">拘束資金合計:</span><span class="value">{funds_disp}</span></div>
@@ -856,7 +782,7 @@ def main():
                 </div>
         """
 
-        for _, r in target_df.sort_values(by="funds_yen").iterrows():
+        for _, r in watch_df.sort_values(by="funds_yen").iterrows():
             c = r["code"]
             n = r["name"]
             n_qty = fmt_qty(r["nikko_now"])
@@ -889,7 +815,7 @@ def main():
         st.markdown("""
         <div class="target-highlight-panel" style="border-color: #334155; opacity: 0.85; padding: 0.5rem 0.8rem;">
             <div class="target-header" style="color: #94a3b8; border-bottom: none; margin-bottom: 0;">
-                🎯 今月の取得目標はまだ選択されていません（一覧の最左列「🎯」にチェックを入れるとここにピン留めされます）
+                ⭐ 監視銘柄はまだ選択されていません（一覧の最左列「⭐」にチェックを入れるとここにピン留めされます）
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -934,19 +860,19 @@ def main():
             filtered_df["yutai_content"].astype(str).str.lower().str.contains(q)
         ]
 
-    # ソート: ターゲット銘柄を常に最上部にピン留めするため target_rank を第1キーとする
+    # ソート: 監視銘柄（⭐）を常に最上部にピン留めするため watch_rank を第1キーとする
     if "取得資金が安い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["target_rank", "funds_yen"], ascending=[True, True])
+        filtered_df = filtered_df.sort_values(by=["watch_rank", "funds_yen"], ascending=[True, True])
     elif "取得資金が高い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["target_rank", "funds_yen"], ascending=[True, False])
+        filtered_df = filtered_df.sort_values(by=["watch_rank", "funds_yen"], ascending=[True, False])
     elif "実質純利益が高い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["target_rank", "net_profit"], ascending=[True, False], na_position="last")
+        filtered_df = filtered_df.sort_values(by=["watch_rank", "net_profit"], ascending=[True, False], na_position="last")
     elif "利回りが高い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["target_rank", "yield_pct"], ascending=[True, False], na_position="last")
+        filtered_df = filtered_df.sort_values(by=["watch_rank", "yield_pct"], ascending=[True, False], na_position="last")
     elif "日興在庫が多い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["target_rank", "nikko_now"], ascending=[True, False], na_position="last")
+        filtered_df = filtered_df.sort_values(by=["watch_rank", "nikko_now"], ascending=[True, False], na_position="last")
     else:
-        filtered_df = filtered_df.sort_values(by=["target_rank", "signal_rank", "funds_yen"], ascending=[True, True, True])
+        filtered_df = filtered_df.sort_values(by=["watch_rank", "signal_rank", "funds_yen"], ascending=[True, True, True])
 
     # ----------------------------------------------------
     # タブ構成
@@ -959,7 +885,7 @@ def main():
     ])
 
     # ----------------------------------------------------
-    # TAB 1: 実戦ボード (st.data_editor + チェックボックス即時保存)
+    # TAB 1: 実戦ボード (st.data_editor + 確実なコードキー差分検知＆保存)
     # ----------------------------------------------------
     with tab1:
         display_rows = []
@@ -969,7 +895,6 @@ def main():
             limit_str = f"D-{r['limit_days_int']}" if r["limit_days_int"] is not None else "―"
 
             display_rows.append({
-                "🎯": bool(r.get("target", False)),
                 "⭐": bool(r.get("watch", False)),
                 "コード": str(r.get("code", "")),
                 "銘柄名": str(r.get("name", "")),
@@ -995,12 +920,12 @@ def main():
         if not df_table.empty:
             edited_table = st.data_editor(
                 df_table,
+                key="yutai_data_editor",
                 use_container_width=True,
                 hide_index=True,
                 height=560,
                 column_config={
-                    "🎯": st.column_config.CheckboxColumn("🎯", width="small", help="今月の取得目標としてダッシュボード上部にピン留め固定"),
-                    "⭐": st.column_config.CheckboxColumn("⭐", width="small", help="監視リスト（スプレッドシート・GitHub自動連動）"),
+                    "⭐": st.column_config.CheckboxColumn("⭐", width="small", help="監視・ピン留め（チェックで最上部に固定＆多層自動保存）"),
                     "コード": st.column_config.TextColumn("コード", width="small"),
                     "銘柄名": st.column_config.TextColumn("銘柄名", width="medium"),
                     "優待内容": st.column_config.TextColumn("優待内容", width="large"),
@@ -1019,44 +944,30 @@ def main():
                     "利回り": st.column_config.TextColumn("利回り", width="small"),
                     "補充": st.column_config.TextColumn("補充", width="small"),
                 },
-                disabled=[c for c in df_table.columns if c not in ["⭐", "🎯"]]
+                disabled=[c for c in df_table.columns if c != "⭐"]
             )
 
-            df_table_reset = df_table.reset_index(drop=True)
-            edited_table_reset = edited_table.reset_index(drop=True)
+            # --- 確実なコードキー差分検知 (インデックスずれ・ソート順に完全非依存) ---
+            orig_map = dict(zip(df_table["コード"], df_table["⭐"]))
+            new_map = dict(zip(edited_table["コード"], edited_table["⭐"]))
 
-            # --- 差分検知 & 多層自動保存 ---
-            # 1. 監視リスト (⭐) の差分検知
-            diff_mask_watch = (edited_table_reset["⭐"] != df_table_reset["⭐"])
-            diff_rows_watch = edited_table_reset[diff_mask_watch]
-            if not diff_rows_watch.empty:
-                for _, erow in diff_rows_watch.iterrows():
-                    c = str(erow["コード"])
-                    w = bool(erow["⭐"])
-                    if w and c not in st.session_state["watchlist"]:
+            changed_items = []
+            for c, new_val in new_map.items():
+                old_val = orig_map.get(c)
+                if old_val is not None and old_val != new_val:
+                    changed_items.append((c, new_val))
+
+            if changed_items:
+                for c, is_watched in changed_items:
+                    if is_watched and c not in st.session_state["watchlist"]:
                         st.session_state["watchlist"].append(c)
-                    elif not w and c in st.session_state["watchlist"]:
+                    elif not is_watched and c in st.session_state["watchlist"]:
                         st.session_state["watchlist"].remove(c)
-                    sync_flag_multi_channel(c, "watch", w, st.session_state["watchlist"], gas_api_url, gh_token, gh_repo)
+                    # 多層保存（ローカル + GitHub API + GAS）
+                    persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo, trigger_code=c)
 
-            # 2. 取得目標リスト (🎯) の差分検知
-            diff_mask_target = (edited_table_reset["🎯"] != df_table_reset["🎯"])
-            diff_rows_target = edited_table_reset[diff_mask_target]
-            if not diff_rows_target.empty:
-                needs_rerun = False
-                for _, erow in diff_rows_target.iterrows():
-                    c = str(erow["コード"])
-                    t = bool(erow["🎯"])
-                    if t and c not in st.session_state["targetlist"]:
-                        st.session_state["targetlist"].append(c)
-                        needs_rerun = True
-                    elif not t and c in st.session_state["targetlist"]:
-                        st.session_state["targetlist"].remove(c)
-                        needs_rerun = True
-                    sync_flag_multi_channel(c, "target", t, st.session_state["targetlist"], gas_api_url, gh_token, gh_repo)
-
-                if needs_rerun:
-                    st.rerun()
+                # 即時再描画（これで上部パネル・ピン留め・ステータスバーが100%確実に即時変化する！）
+                st.rerun()
 
     # ----------------------------------------------------
     # TAB 2: 日時別 在庫推移マトリクス
@@ -1078,7 +989,7 @@ def main():
         if len(all_ts) < 2:
             st.info("スナップショットが1件のみのためマトリクスを表示できません。「🚀 最新取得」等で取得を重ねると推移が表示されます。")
         else:
-            mx_watch = [c for c in st.session_state["targetlist"] + st.session_state["watchlist"] if c in df_analyzed["code"].tolist()]
+            mx_watch = [c for c in st.session_state["watchlist"] if c in df_analyzed["code"].tolist()]
             if not mx_watch:
                 mx_watch = df_analyzed[df_analyzed["nikko_now"].fillna(0) > 0]["code"].head(12).tolist()
 
@@ -1153,7 +1064,7 @@ def main():
     # ----------------------------------------------------
     with tab3:
         st.markdown("##### 📈 日興在庫の時系列推移チャート")
-        watch_or_top = [c for c in st.session_state["targetlist"] + st.session_state["watchlist"] if c in df_analyzed["code"].tolist()]
+        watch_or_top = [c for c in st.session_state["watchlist"] if c in df_analyzed["code"].tolist()]
         if not watch_or_top:
             watch_or_top = df_analyzed[df_analyzed["nikko_now"].fillna(0) > 0]["code"].head(8).tolist()
 
@@ -1181,12 +1092,12 @@ def main():
         st.markdown(f"""
         ### ⚡ 完全サーバーレス自動運用の仕組み ＆ 永続化仕様
 
-        1. **「🎯 取得目標」と「⭐ 監視」の多層永続化**:
-           - 画面左側のチェックボックス（`🎯` / `⭐`）を切り替えると、即座に画面へ反映され、以下の3つのレイヤーで自動保存されます：
+        1. **「⭐ 監視（ピン留め）」の多層永続化**:
+           - 画面左側のチェックボックス（`⭐`）を切り替えると、即座に画面へ反映され、以下の3つのレイヤーで自動保存されます：
              - **① セッションキャッシュ**: 同一ブラウザ操作中は待ち時間ゼロ（0.01秒）で高速反映。
-             - **② ローカルファイル**: `data/targetlist.json` と `data/watchlist.json` にローカル即時保存。
+             - **② ローカルファイル**: `data/watchlist.json` にローカル即時保存。
              - **③ Googleスプレッドシート/GAS**: 指定されたGAS URLへ非同期送信。
-             - **④ GitHubリポジトリ永続化**: Streamlit Secretsの `GITHUB_TOKEN` を使用してリポジトリ本体に自動コミット。Streamlit Cloudがスリープ・再起動しても設定が永久に保持されます。
+             - **④ GitHubリポジトリ永続化**: `GITHUB_TOKEN` を使用してリポジトリ本体（`data/watchlist.json`）に自動コミット。Streamlit Cloudがスリープ・再起動しても設定が永久に保持されます。
         2. **定期自動巡回**:
            - 平日毎日 **17:00** および **20:00**（JST）に GitHub Actions が自動起動し、最新の一般信用在庫を追記コミットします。
         3. **「🚀 最新取得」ボタン（オンデマンド実行）**:
