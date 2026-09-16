@@ -46,7 +46,7 @@ st.set_page_config(
     page_title="優待クロス在庫トラッカー",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="auto",
 )
 
 ULTRA_COMPACT_CSS = """
@@ -2079,6 +2079,33 @@ def main():
         st.markdown(alert_banner_html, unsafe_allow_html=True)
 
     # ----------------------------------------------------
+    # メイン画面 権利月クイック切替バー
+    # ----------------------------------------------------
+    quick_months = month_options[:6]  # 向こう半年分
+    quick_labels = {m: f"{m.split('-')[1]}月 ({m})" + (" ✅" if any(x["month"] == m and x["has_data"] for x in available_months_info) else " ⚠️") for m in quick_months}
+    if chosen_month not in quick_months:
+        quick_months.append(chosen_month)
+        quick_labels[chosen_month] = f"{chosen_month.split('-')[1]}月 ({chosen_month})"
+
+    c_m1, c_m2 = st.columns([1.2, 8.8])
+    with c_m1:
+        st.markdown("<div style='font-size:12px; font-weight:600; color:#cbd5e1; padding-top:6px;'>📅 権利月切替:</div>", unsafe_allow_html=True)
+    with c_m2:
+        quick_selected = st.radio(
+            "権利月クイック選択",
+            options=quick_months,
+            index=quick_months.index(chosen_month) if chosen_month in quick_months else 0,
+            format_func=lambda m: quick_labels.get(m, m),
+            horizontal=True,
+            label_visibility="collapsed",
+            key="main_quick_month_radio"
+        )
+        if quick_selected != chosen_month:
+            st.session_state["selected_month"] = quick_selected
+            st.query_params["month"] = quick_selected
+            st.rerun()
+
+    # ----------------------------------------------------
     # コントロールバー
     # ----------------------------------------------------
     c_f1, c_f2, c_f3, c_f4, c_f5, c_f6, c_f7 = st.columns([1.8, 1.3, 0.9, 0.9, 1.6, 1.1, 1.3])
@@ -2097,19 +2124,18 @@ def main():
             st.rerun()
     with c_f7:
         if st.button("🚀 最新取得", use_container_width=True):
-            with st.spinner("⚡ 最新在庫データを直接スクレイピング中 (数秒)..."):
-                ok, msg = run_direct_scrape()
+            with st.spinner(f"⚡ {chosen_month} の最新在庫データを直接スクレイピング中 (数秒)..."):
+                ok, msg = run_direct_scrape(rights_arg=chosen_month)
                 if ok:
                     st.toast("✅ " + msg)
                     # もしGitHub Tokenがあれば非同期でGitHubへも自動プッシュ
                     if gh_token and gh_repo:
                         try:
                             # 最新CSVをGitHubへ自動コミット
-                            latest_csvs = sorted(DATA_DIR.glob("history_*.csv"))
+                            latest_csvs = sorted(DATA_DIR.glob(f"history_{chosen_month}_*.csv"))
                             if latest_csvs:
                                 l_csv = latest_csvs[-1]
-                                content_b64 = base64.b64encode(l_csv.read_bytes()).decode("utf-8")
-                                c_msg = f"Auto update stock data via Web UI: {l_csv.name}"
+                                c_msg = f"Auto update {chosen_month} stock data via Web UI: {l_csv.name}"
                                 threading.Thread(target=_sync_to_github_worker, args=(gh_token, gh_repo, l_csv.read_text(encoding="utf-8-sig"), c_msg, f"data/{l_csv.name}"), daemon=True).start()
                         except Exception: pass
                     st.rerun()
