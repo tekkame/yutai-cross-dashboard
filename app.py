@@ -5,7 +5,7 @@ app.py - 株主優待クロス在庫トラッカー ＆ 実戦意思決定ダッ
 - ⭐ 監視リスト ＝ ピン留めリスト に完全一本化（目的の重複を解消）
 - 🎯 画面上部に「⭐ 監視・目標銘柄ハイライト」（拘束資金合計・見込純利益計・対象カード一覧）
 - ⚡ 実戦ボード data_editor による「⭐」チェックボックス直接操作（辞書キー比較で確実に検知 ＆ 即座に画面反映）
-- 💾 Streamlit Cloud 完全対応の多層永続化（Session + Local File + GitHub API Commit + GAS/Sheets Sync）
+- 💾 Streamlit Cloud 完全対応の多層永続化（Session + Local File + GitHub API Commit + GitHub Repo Sync）
 - 🗓 日時別 在庫推移マトリクス ＆ 📈 日興在庫時系列推移チャート
 - 🚀 GitHub Actions 1クリックオンデマンド・スクレイピング起動
 """
@@ -251,6 +251,15 @@ def calc_nikko_cost(
     lend_fee = funds_yen * lend_rate / 365.0 * days
     return int(round(buy_interest + lend_fee))
 
+def pick_first_valid(*vals: Any) -> Any:
+    """falsyな数値（0や0.0等）を落とさずに先頭の有効な値を取得"""
+    for v in vals:
+        if v is not None:
+            s = str(v).strip()
+            if s not in ("", "―", "-", "ー", "nan", "None", "null"):
+                return v
+    return "―"
+
 def calc_nomura_daily_interest(loan_man: float, rate: float = DEFAULT_NOMURA_RATE) -> int:
     """野村證券Web担保ローン 1日あたりの利息 (円)
     - loan_man: 借入金額 (万円)
@@ -269,18 +278,18 @@ def calc_breakeven_wait_days(
     lend_rate: float = DEFAULT_NIKKO_LEND_RATE
 ) -> Optional[int]:
     """優待価値に対して、今クロスした場合の損益分岐待機日数（あと何日待てるか）を算出
-    - 1日あたりコスト: 日興貸株料 (funds_yen * 1.9% / 365) + 野村日歩
+    ★個別銘柄行では日興信用貸株料の余力を純粋に算出（ポートフォリオ野村利息は総合カードで一括合算）
+    - 1日あたり貸株料: funds_yen * 1.9% / 365
     - 残余バッファ = 優待価値 - 現在の日興コスト
-    - 待機可能日数 = 残余バッファ / 1日あたりコスト
+    - 待機可能日数 = 残余バッファ / 1日あたり貸株料
     """
     if yutai_val is None or yutai_val <= 0 or funds_yen is None or funds_yen <= 0 or funds_yen >= 99999990:
         return None
     daily_lend_fee = funds_yen * lend_rate / 365.0
-    daily_total = daily_lend_fee + max(0, nomura_daily_cost)
-    if daily_total <= 0:
+    if daily_lend_fee <= 0:
         return None
     rem_margin = yutai_val - current_nikko_cost
-    wait_days = int(rem_margin / daily_total)
+    wait_days = int(rem_margin / daily_lend_fee)
     return wait_days
 
 # ============================================================
@@ -404,16 +413,25 @@ def get_current_execution_date(now_dt: Optional[dt.datetime] = None) -> dt.date:
         cur += dt.timedelta(days=1)
     return cur
 
-def parse_rights_month(val: Any) -> Tuple[Optional[int], int, int]:
+def parse_rights_month(val: Any, default_month_str: Optional[str] = None) -> Tuple[Optional[int], int, int]:
     """権利年月文字列（例: '2026-09-20', '2026-09', '2027/03/20', '9月20日', '9月', '9', '20日'等）を解析
     戻り値: (year, month, day)
-    - year: 西暦年（指定がある場合。未指定なら None）
+    - year: 西暦年（指定がある場合。未指定なら default_month_str または None）
     - month: 権利月 (1〜12)
     - day: 権利日 (20日権利銘柄は 20, 月末権利銘柄は 0)
-    ★ISO日付 '2026-09-20' や '2026/09/20' の 20日判定＆年情報完全保持
     """
+    def_y, def_m = None, 9
+    if default_month_str:
+        m_def = re.search(r"(\d{4})[-/](\d{1,2})", str(default_month_str))
+        if m_def:
+            def_y, def_m = int(m_def.group(1)), int(m_def.group(2))
+        else:
+            m_def2 = re.search(r"^(\d{1,2})", str(default_month_str))
+            if m_def2:
+                def_m = int(m_def2.group(1))
+
     if val is None or str(val).strip() in ("", "-", "―", "nan", "None"):
-        return (None, 9, 0)
+        return (def_y, def_m, 0)
     s = str(val).strip()
     
     # 明確に ISO 形式 YYYY-MM-DD や YYYY/MM/DD を抽出
@@ -442,12 +460,12 @@ def parse_rights_month(val: Any) -> Tuple[Optional[int], int, int]:
     d = 20 if is_20th else 0
     m_m = re.search(r"(\d{1,2})\s*月", s)
     if m_m:
-        return (None, int(m_m.group(1)), d)
+        return (def_y, int(m_m.group(1)), d)
     m_digit = re.search(r"^(\d{1,2})$", s)
     if m_digit:
-        return (None, int(m_digit.group(1)), d)
+        return (def_y, int(m_digit.group(1)), d)
 
-    return (None, 9, d)
+    return (def_y, def_m, d)
 
 def get_stock_rights_dates(year: int, month: int, day: int = 0) -> Tuple[dt.date, dt.date, dt.date, dt.date]:
     """対象年月の (権利確定日, 権利付最終売買日, 権利落ち日, 現渡受渡日) を算出"""
@@ -475,27 +493,29 @@ def get_stock_rights_dates(year: int, month: int, day: int = 0) -> Tuple[dt.date
 
 def calc_stock_lend_days(
     rights_val: Any,
-    now_dt: Optional[dt.datetime] = None
+    now_dt: Optional[dt.datetime] = None,
+    default_rights_month: Optional[str] = None
 ) -> Tuple[int, dt.date, dt.date, dt.date]:
     """対象銘柄の権利年月と現在日時から、今約定した場合の【想定貸株日数】を完全自動計算
     戻り値: (lend_days, exec_date, open_settle, close_settle)
+    ★致命的バグ修正:
+      約定予定日が権利付最終売買日を過ぎている場合、翌年に飛ばさず lend_days = 0（権利落ち済・注文不可）を返す！
     """
     if now_dt is None:
         now_dt = get_now_jst()
     exec_d = get_current_execution_date(now_dt)
 
-    req_year, month, day = parse_rights_month(rights_val)
+    req_year, month, day = parse_rights_month(rights_val, default_month_str=default_rights_month)
 
     year = req_year if req_year is not None else exec_d.year
     rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
-    # 過去データ混入安全ガード: 約定日が権利付最終売買日を過ぎている場合は未来の該当年月まで年を進める
-    max_year = exec_d.year + 5
-    while exec_d > last_trade and year < max_year:
-        year += 1
-        rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
 
     # 新規売建受渡日 (約定日の2営業日後)
     open_settle = get_settlement_date(exec_d)
+
+    # ★ 権利付最終売買日を超過している場合は翌年に送らず権利落ち（0日）とする
+    if exec_d > last_trade:
+        return 0, exec_d, open_settle, close_settle
 
     # 日興証券公式ルール: 信用取引貸株料・金利は新規受渡日から返済受渡日までの「両端入れ」
     lend_days = max(1, (close_settle - open_settle).days + 1)
@@ -587,8 +607,33 @@ KNOWN_YUTAI = {
 }
 
 def fmt_yutai_enhanced(content: str, yutai_val: Optional[float] = None, code: str = "") -> str:
-    """優待内容に数値（金額・数量）や種類を的確に追加し、簡潔かつ具体的に表示"""
+    """優待内容に数値（金額・数量）や種類を的確に追加し、簡潔かつ具体的に表示
+    ★マスタの最新内容を最優先とし、未取得・空の場合のみ KNOWN_YUTAI で補完する"""
     c = str(code).strip()
+
+    # マスタに有効な優待内容が存在する場合は、それを整形して活用（最新の優待改定に追従）
+    if content and not pd.isna(content) and str(content).strip() not in ("", "-", "―", "nan", "None"):
+        s = str(content).strip()
+        s = re.sub(r"【[\d,]+株[^】]*】", "", s)
+        s = re.sub(r"【注：[^】]*】", "", s)
+        s = re.sub(r"\[[^\]]*\]", "", s).strip()
+        if re.search(r"\d+円|\d+万|相当|割引|無料|株主優待券|\d+枚|\d+kg|ポイント", s):
+            return s[:33] + "…" if len(s) > 34 else s
+        kind_map = {
+            "QUO": "QUOカード", "QUO等": "QUOカード等", "ﾎﾟｲﾝﾄ等": "買物ポイント等",
+            "ポイント等": "買物ポイント等", "優待券": "買物・施設優待券", "自社製品": "自社製品詰合せ",
+            "割引券": "優待割引券", "お米": "お米ギフト", "カタログ": "グルメ・ギフトカタログ"
+        }
+        for k, v in kind_map.items():
+            if s == k:
+                if yutai_val and yutai_val > 0:
+                    return f"{v} ({int(round(yutai_val)):,}円相当)"
+                return v
+        if yutai_val and yutai_val > 0:
+            return f"{s} ({int(round(yutai_val)):,}円相当)"
+        return s
+
+    # マスタが空・未取得の場合のみ KNOWN_YUTAI で安全に補完
     if c in KNOWN_YUTAI:
         return KNOWN_YUTAI[c]
 
@@ -755,21 +800,29 @@ def get_github_token() -> str:
 # 4. アプリ内直接スクレイピング ＆ 日時基準（Daily Snapshot）抽出
 # ============================================================
 def run_direct_scrape(rights_arg: Optional[str] = None) -> Tuple[bool, str]:
-    """Streamlit アプリ内で直接 Gokigen API ＆ Routine優待データをスクレイピングして即時更新"""
+    """Streamlit アプリ内で直接 Gokigen API ＆ Routine優待データをスクレイピングして即時更新
+    ★仕様補足: main.run() における `dry_run` 引数は、本システムでは「外部スプレッドシートに触らず、
+      ローカルDATA_DIR配下にCSVを出力・保存するモード」を意味します。
+      そのため dry_run=True を指定することで、ローカルおよびクラウドのCSVファイルが確実に更新されます。
+    """
     try:
         import main as scraper_main
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        before_csvs = set(DATA_DIR.glob("*.csv"))
         ret = scraper_main.run(
-            dry_run=True,
+            dry_run=True,  # SheetsではなくローカルCSV出力モード
             out_dir=str(DATA_DIR),
             rights_arg=rights_arg,
             kengi_arg=None,
             watch_expr=None
         )
         if ret == 0:
+            after_csvs = set(DATA_DIR.glob("*.csv"))
+            new_files = after_csvs - before_csvs
             st.cache_data.clear()
             target_str = f"【{rights_arg}】" if rights_arg else "【当月】"
-            return True, f"{target_str} の最新在庫データを直接スクレイピング取得しました！"
+            file_note = f" (新規CSV: {len(new_files)}件保存済)" if new_files else ""
+            return True, f"{target_str} の最新在庫データを直接スクレイピング取得しました！{file_note}"
         return False, f"スクレイピング処理でエラーが発生しました (code: {ret})"
     except Exception as e:
         return False, f"スクレイピング実行例外: {e}"
@@ -1032,20 +1085,23 @@ def fetch_user_settings_from_github(token: str, repo: str) -> Optional[Dict[str,
     return None
 
 def load_user_settings(gh_token: str = "", gh_repo: str = "") -> Dict[str, Any]:
-    """ローカル/GitHub/URLパラメータの多層フェイルオーバーでユーザー設定を確実に復元"""
+    """ローカル/GitHub/URLパラメータの多層フェイルオーバーでユーザー設定を確実に復元
+    ★レースコンディション防止: ローカル設定が保存されている場合はリモートの古い非同期キャッシュで上書きしない"""
     settings = DEFAULT_SETTINGS.copy()
+    has_local_saved = False
 
     # 1. ローカルディスク確認
     if SETTINGS_FILE.exists():
         try:
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
+            if isinstance(data, dict) and data:
                 settings.update(data)
+                has_local_saved = True
         except Exception:
             pass
 
-    # 2. GitHub リポジトリから最新の user_settings.json を取得（Cloud再起動対策）
-    if gh_repo:
+    # 2. GitHub リポジトリから取得（ローカルが空またはCloud初起動時のみリモートを採用）
+    if gh_repo and not has_local_saved:
         remote_data = fetch_user_settings_from_github(gh_token, gh_repo)
         if remote_data and isinstance(remote_data, dict):
             settings.update(remote_data)
@@ -1053,7 +1109,7 @@ def load_user_settings(gh_token: str = "", gh_repo: str = "") -> Dict[str, Any]:
                 SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception: pass
 
-    # 3. URL クエリパラメータから復元（ユーザーのブラウザ操作を最優先保持）
+    # 3. URL クエリパラメータから復元（ユーザーの直近のブラウザ操作を最優先保持）
     try:
         params = st.query_params
         if "nomura_loan" in params:
@@ -1073,7 +1129,7 @@ def load_user_settings(gh_token: str = "", gh_repo: str = "") -> Dict[str, Any]:
 
     return settings
 
-def save_user_settings(settings: Dict[str, Any], gh_token: str = "", gh_repo: str = "", gas_url: str = ""):
+def save_user_settings(settings: Dict[str, Any], gh_token: str = "", gh_repo: str = ""):
     """ユーザー設定（野村借入額・起算日等）を即座にローカル＆GitHub＆URLへ永続保存"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     json_str = json.dumps(settings, ensure_ascii=False, indent=2)
@@ -1167,13 +1223,13 @@ def load_all_combined_data(target_month: Optional[str] = None) -> Tuple[pd.DataF
         h_files = sorted([DATA_DIR / f for f in os.listdir(DATA_DIR) if f.startswith(prefix_h) and f.endswith(".csv")])
         for hf in h_files:
             try:
-                df_tmp = pd.read_csv(hf)
+                df_tmp = pd.read_csv(hf, encoding="utf-8-sig")
                 if not df_tmp.empty: hist_dfs.append(df_tmp)
             except Exception: pass
 
         m_files = sorted([DATA_DIR / f for f in os.listdir(DATA_DIR) if f.startswith(prefix_m) and f.endswith(".csv")], reverse=True)
         if m_files:
-            try: latest_master = pd.read_csv(m_files[0])
+            try: latest_master = pd.read_csv(m_files[0], encoding="utf-8-sig")
             except Exception: pass
 
     if hist_dfs:
@@ -1219,6 +1275,10 @@ def normalize_history(df: pd.DataFrame) -> pd.DataFrame:
         else:
             d[col] = None
 
+    for col in ["sbi", "rtn_sbi", "gmo", "matsui", "monex"]:
+        if col not in d.columns:
+            d[col] = None
+
     if "timestamp" in d.columns:
         d["dt"] = pd.to_datetime(d["timestamp"], errors="coerce")
         d = d.sort_values(by="dt", ascending=True)
@@ -1261,7 +1321,11 @@ def analyze_stocks(
     if df_hist is None or df_hist.empty:
         return pd.DataFrame(), {}, []
 
-    all_timestamps = df_hist["timestamp"].dropna().unique().tolist()
+    if "dt" in df_hist.columns:
+        valid_dt_df = df_hist.dropna(subset=["dt"]).sort_values(by="dt", ascending=True)
+        all_timestamps = valid_dt_df["timestamp"].dropna().unique().tolist()
+    else:
+        all_timestamps = df_hist["timestamp"].dropna().unique().tolist()
     latest_ts = all_timestamps[-1] if all_timestamps else ""
     prev_ts = all_timestamps[-2] if len(all_timestamps) >= 2 else None
 
@@ -1316,7 +1380,7 @@ def analyze_stocks(
         rakuten_now = to_float(row.get("rakuten"))
         kabu_now = to_float(row.get("kabu"))
 
-        sbi_now_raw = str(row.get("rtn_sbi") or row.get("sbi") or "―").strip()
+        sbi_now_raw = str(pick_first_valid(row.get("rtn_sbi"), row.get("sbi"))).strip()
         sbi_now = fmt_signal(sbi_now_raw)
 
         gmo_now = str(row.get("gmo") or m_row.get("gmo_limit") or "―").strip()
@@ -1325,7 +1389,7 @@ def analyze_stocks(
         nikko_prev = to_float(prev_day_row.get("nikko")) if prev_day_row is not None else None
         rakuten_prev = to_float(prev_day_row.get("rakuten")) if prev_day_row is not None else None
 
-        sbi_prev_raw = str(prev_day_row.get("rtn_sbi") or prev_day_row.get("sbi") or "―").strip() if prev_day_row is not None else "―"
+        sbi_prev_raw = str(pick_first_valid(prev_day_row.get("rtn_sbi"), prev_day_row.get("sbi"))).strip() if prev_day_row is not None else "―"
         sbi_prev = fmt_signal(sbi_prev_raw)
 
         nikko_diff = (nikko_now - nikko_prev) if (nikko_now is not None and nikko_prev is not None) else None
@@ -1420,7 +1484,7 @@ def analyze_stocks(
             item_lend_days = int(nikko_lend_days)
             is_auto_days = False
         else:
-            item_lend_days, _, _, _ = calc_stock_lend_days(rights_val)
+            item_lend_days, _, _, _ = calc_stock_lend_days(rights_val, default_rights_month=default_rights_month)
             is_auto_days = True
 
         net_profit = None
@@ -1431,7 +1495,16 @@ def analyze_stocks(
         net_profit_nikko_str = "―"
         nomura_item_daily_interest = 0
 
-        if funds_yen < 99999990 and funds_yen > 0:
+        is_expired = (item_lend_days == 0 and is_auto_days)
+        if is_expired:
+            signal = "⚪ 権利落済"
+            signal_rank = 6
+            nikko_cost = 0
+            nikko_cost_str = "権利落済"
+            net_profit_nikko = None
+            net_profit_nikko_str = "―"
+            wait_label = "🏁権利落"
+        elif funds_yen < 99999990 and funds_yen > 0:
             nikko_cost = calc_nikko_cost(funds_yen, lend_days=item_lend_days)
             nikko_cost_str = f"¥{nikko_cost:,}"
             if yutai_val is not None and yutai_val > 0:
@@ -1832,7 +1905,7 @@ def main():
         if DATA_DIR.exists():
             for mf in sorted(DATA_DIR.glob("master_*.csv")):
                 try:
-                    m_df = pd.read_csv(mf, usecols=["コード", "銘柄名"])
+                    m_df = pd.read_csv(mf, usecols=["コード", "銘柄名"], encoding="utf-8-sig")
                     for _, r in m_df.iterrows():
                         c_std = fmt_code(r["コード"])
                         if c_std not in global_name_map:
@@ -2401,9 +2474,12 @@ def main():
                 )
 
             if codes_mx:
-                bcol = BROKER_COLS[mx_broker]
-                ts_list = all_ts[-n_snap:]
-                sub = (df_hist[df_hist["code"].isin(codes_mx) & df_hist["timestamp"].isin(ts_list)]
+                bcol = BROKER_COLS.get(mx_broker, "nikko")
+                if bcol not in df_hist.columns or df_hist[bcol].isna().all():
+                    st.info(f"ℹ️ {mx_broker} の在庫・信号データは現在取得されている履歴CSVに含まれていません。")
+                else:
+                    ts_list = all_ts[-n_snap:]
+                    sub = (df_hist[df_hist["code"].isin(codes_mx) & df_hist["timestamp"].isin(ts_list)]
                        [["code", "timestamp", bcol]]
                        .sort_values("timestamp")
                        .drop_duplicates(subset=["code", "timestamp"], keep="last"))
