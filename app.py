@@ -750,18 +750,19 @@ def main():
         annual_rate=annual_rate
     )
 
-    # ステータスバー
-    st.markdown(f"""
-    <div class="status-bar">
-        <div class="status-bar-title">⚡ <b>優待クロス在庫トラッカー</b> <span style="font-size:11px;font-weight:normal;color:#94a3b8;">({APP_VERSION})</span></div>
-        <div class="status-tags">
-            <span class="tag tag-green">{data_source_msg}</span>
-            <span class="tag tag-blue">最新取得: {stats.get('latest_ts', '―')}</span>
-            <span class="tag tag-amber">⭐ 監視中: {stats.get('watch_count', 0)}銘柄</span>
-            <span class="tag tag-red">今夜確保: {stats.get('tonight_count', 0)}</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ステータスバー (インデントなしで安全に描画)
+    status_bar_html = (
+        f'<div class="status-bar">'
+        f'<div class="status-bar-title">⚡ <b>優待クロス在庫トラッカー</b> <span style="font-size:11px;font-weight:normal;color:#94a3b8;">({APP_VERSION})</span></div>'
+        f'<div class="status-tags">'
+        f'<span class="tag tag-green">{data_source_msg}</span>'
+        f'<span class="tag tag-blue">最新取得: {stats.get("latest_ts", "―")}</span>'
+        f'<span class="tag tag-amber">⭐ 監視中: {stats.get("watch_count", 0)}銘柄</span>'
+        f'<span class="tag tag-red">今夜確保: {stats.get("tonight_count", 0)}</span>'
+        f'</div>'
+        f'</div>'
+    )
+    st.markdown(status_bar_html, unsafe_allow_html=True)
 
     # ----------------------------------------------------
     # ★ 監視・目標銘柄ハイライト・パネル (⭐ピン留め一覧)
@@ -776,21 +777,7 @@ def main():
         funds_disp = f"¥{int(total_funds):,}" if total_funds > 0 else "―"
         profit_disp = f"¥{int(total_profit):,}" if total_profit is not None else "―"
 
-        html_panel = f"""
-        <div class="target-highlight-panel">
-            <div class="target-header">
-                ⭐ 監視・目標銘柄ハイライト ({len(watch_df)}件ピン留め中)
-            </div>
-            <div class="target-summary">
-                <div class="target-summary-item"><span class="label">拘束資金合計:</span><span class="value">{funds_disp}</span></div>
-                <div class="target-summary-item"><span class="label">見込純利益計:</span><span class="value" style="color:#86efac;">{profit_disp}</span></div>
-            </div>
-            <div style="margin-top: 0.35rem; background: #0f172a; border-radius: 4px; padding: 0.4rem 0.6rem;">
-                <div class="target-item-row" style="border-bottom: 1px solid #334155; font-weight: bold; color: #94a3b8; padding-bottom: 0.2rem;">
-                    <div>コード</div><div>銘柄名</div><div style="text-align:right;">日興最新</div><div style="text-align:center;">SBI</div><div style="text-align:right;">取得資金</div><div style="text-align:right;">見込純益</div><div>優待内容</div>
-                </div>
-        """
-
+        rows_html_list = []
         for _, r in watch_df.sort_values(by="funds_yen").iterrows():
             c = r["code"]
             n = r["name"]
@@ -803,31 +790,48 @@ def main():
             sbi_color = "#f87171" if s_val in ("×", "▲") else ("#a7f3d0" if s_val == "◎" else "#94a3b8")
             nikko_color = "#f87171" if (r["nikko_now"] is not None and r["nikko_now"] < nikko_th) else "#a7f3d0"
 
-            html_panel += f"""
-                <div class="target-item-row">
-                    <div class="target-code">{c}</div>
-                    <div class="target-name" title="{n}">{n}</div>
-                    <div class="target-nikko" style="color: {nikko_color};">{n_qty}</div>
-                    <div class="target-sbi" style="color: {sbi_color};">{s_val}</div>
-                    <div class="target-funds">{f_val}</div>
-                    <div class="target-profit">{p_val}</div>
-                    <div class="target-yutai" title="{y_val}">{y_val}</div>
-                </div>
-            """
+            row_html = (
+                f'<div class="target-item-row">'
+                f'<div class="target-code">{c}</div>'
+                f'<div class="target-name" title="{n}">{n}</div>'
+                f'<div class="target-nikko" style="color: {nikko_color};">{n_qty}</div>'
+                f'<div class="target-sbi" style="color: {sbi_color};">{s_val}</div>'
+                f'<div class="target-funds">{f_val}</div>'
+                f'<div class="target-profit">{p_val}</div>'
+                f'<div class="target-yutai" title="{y_val}">{y_val}</div>'
+                f'</div>'
+            )
+            rows_html_list.append(row_html)
 
-        html_panel += """
-            </div>
-        </div>
-        """
+        all_rows_html = "".join(rows_html_list)
+
+        html_panel = (
+            f'<div class="target-highlight-panel">'
+            f'<div class="target-header">⭐ 監視・目標銘柄ハイライト ({len(watch_df)}件ピン留め中)</div>'
+            f'<div class="target-summary">'
+            f'<div class="target-summary-item"><span class="label">拘束資金合計:</span><span class="value">{funds_disp}</span></div>'
+            f'<div class="target-summary-item"><span class="label">見込純利益計:</span><span class="value" style="color:#86efac;">{profit_disp}</span></div>'
+            f'</div>'
+            f'<div style="margin-top: 0.35rem; background: #0f172a; border-radius: 4px; padding: 0.4rem 0.6rem;">'
+            f'<div class="target-item-row" style="border-bottom: 1px solid #334155; font-weight: bold; color: #94a3b8; padding-bottom: 0.2rem;">'
+            f'<div>コード</div><div>銘柄名</div><div style="text-align:right;">日興最新</div><div style="text-align:center;">SBI</div><div style="text-align:right;">取得資金</div><div style="text-align:right;">見込純益</div><div>優待内容</div>'
+            f'</div>'
+            f'<div style="max-height: 155px; overflow-y: auto; padding-right: 4px;">'
+            f'{all_rows_html}'
+            f'</div>'
+            f'</div>'
+            f'</div>'
+        )
         st.markdown(html_panel, unsafe_allow_html=True)
     else:
-        st.markdown("""
-        <div class="target-highlight-panel" style="border-color: #334155; opacity: 0.85; padding: 0.5rem 0.8rem;">
-            <div class="target-header" style="color: #94a3b8; border-bottom: none; margin-bottom: 0;">
-                ⭐ 監視銘柄はまだ選択されていません（一覧の最左列「⭐」にチェックを入れるとここにピン留めされます）
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        empty_panel = (
+            f'<div class="target-highlight-panel" style="border-color: #334155; opacity: 0.85; padding: 0.5rem 0.8rem;">'
+            f'<div class="target-header" style="color: #94a3b8; border-bottom: none; margin-bottom: 0;">'
+            f'⭐ 監視銘柄はまだ選択されていません（一覧の最左列「⭐」にチェックを入れるとここにピン留めされます）'
+            f'</div>'
+            f'</div>'
+        )
+        st.markdown(empty_panel, unsafe_allow_html=True)
 
     # ----------------------------------------------------
     # コントロールバー
