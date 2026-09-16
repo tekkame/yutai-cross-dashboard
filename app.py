@@ -215,7 +215,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v11.6 (Wait Savings & Continuous Check UX)"
+APP_VERSION = "v11.7 (Loan Settings Full Persistence)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -1028,9 +1028,27 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "nikko_lend_rate": DEFAULT_NIKKO_LEND_RATE,
 }
 
-def load_user_settings() -> Dict[str, Any]:
-    """ローカル/リポジトリ同梱の user_settings.json から設定を復元"""
+def fetch_user_settings_from_github(token: str, repo: str) -> Optional[Dict[str, Any]]:
+    """GitHub API / Raw から直接最新の data/user_settings.json を取得（Cloud再起動時の初期化を防止）"""
+    if not repo: return None
+    try:
+        url = f"https://raw.githubusercontent.com/{repo}/main/data/user_settings.json"
+        req = urllib.request.Request(url, headers={"User-Agent": "Streamlit-Yutai-Dashboard"})
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return None
+
+def load_user_settings(gh_token: str = "", gh_repo: str = "") -> Dict[str, Any]:
+    """ローカル/GitHub/URLパラメータの多層フェイルオーバーでユーザー設定を確実に復元"""
     settings = DEFAULT_SETTINGS.copy()
+
+    # 1. ローカルディスク確認
     if SETTINGS_FILE.exists():
         try:
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -1038,16 +1056,55 @@ def load_user_settings() -> Dict[str, Any]:
                 settings.update(data)
         except Exception:
             pass
+
+    # 2. GitHub リポジトリから最新の user_settings.json を取得（Cloud再起動対策）
+    if gh_repo:
+        remote_data = fetch_user_settings_from_github(gh_token, gh_repo)
+        if remote_data and isinstance(remote_data, dict):
+            settings.update(remote_data)
+            try:
+                SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception: pass
+
+    # 3. URL クエリパラメータから復元（ユーザーのブラウザ操作を最優先保持）
+    try:
+        params = st.query_params
+        if "nomura_loan" in params:
+            settings["nomura_loan_man"] = float(params["nomura_loan"])
+        if "nomura_date" in params:
+            val_date = str(params["nomura_date"]).strip()
+            dt.datetime.strptime(val_date, "%Y-%m-%d")
+            settings["nomura_loan_date"] = val_date
+        if "nomura_rate" in params:
+            settings["nomura_rate"] = float(params["nomura_rate"])
+        if "nikko_mode" in params:
+            settings["nikko_mode"] = str(params["nikko_mode"])
+        if "nikko_days" in params:
+            settings["nikko_lend_days"] = int(params["nikko_days"])
+    except Exception:
+        pass
+
     return settings
 
-def save_user_settings(settings: Dict[str, Any], gh_token: str = "", gh_repo: str = ""):
-    """ユーザー設定（野村借入額・日数等）を即座にローカル＆GitHubへ永続保存"""
+def save_user_settings(settings: Dict[str, Any], gh_token: str = "", gh_repo: str = "", gas_url: str = ""):
+    """ユーザー設定（野村借入額・起算日等）を即座にローカル＆GitHub＆URLへ永続保存"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     json_str = json.dumps(settings, ensure_ascii=False, indent=2)
     try:
         SETTINGS_FILE.write_text(json_str, encoding="utf-8")
     except Exception:
         pass
+
+    # URL クエリパラメータにも即座に同期（ブラウザリロード・別タブ・再訪問時にも100%保持）
+    try:
+        st.query_params["nomura_loan"] = str(settings.get("nomura_loan_man", 0.0))
+        st.query_params["nomura_date"] = str(settings.get("nomura_loan_date", "2026-09-01"))
+        st.query_params["nomura_rate"] = f"{float(settings.get('nomura_rate', DEFAULT_NOMURA_RATE)):.4f}"
+        st.query_params["nikko_mode"] = str(settings.get("nikko_mode", "auto"))
+        st.query_params["nikko_days"] = str(settings.get("nikko_lend_days", 14))
+    except Exception:
+        pass
+
     if gh_token and gh_repo:
         loan_v = settings.get("nomura_loan_man", 0)
         date_v = settings.get("nomura_loan_date", "2026-09-01")
@@ -1482,9 +1539,9 @@ def main():
     gh_token = get_github_token()
     gh_repo = safe_get_secret("GITHUB_REPO", "tekkame/yutai-cross-dashboard")
 
-    # ユーザー設定（野村担保ローン借入額・日興貸株日数）の読み込み
+    # ユーザー設定（野村担保ローン借入額・起算日・日興貸株日数）の読み込み（URLパラメータ + GitHub + ローカル多層復元）
     if "user_settings" not in st.session_state:
-        st.session_state["user_settings"] = load_user_settings()
+        st.session_state["user_settings"] = load_user_settings(gh_token=gh_token, gh_repo=gh_repo)
     current_settings = st.session_state["user_settings"]
 
     with st.sidebar:
@@ -1524,13 +1581,14 @@ def main():
         )
         rate_val = rate_percent_in / 100.0
 
-        # 設定変更時の自動記憶
+        # 設定変更時の自動記憶（URL・GitHub・ローカルの3重同期）
         if (loan_in != nomura_loan_val) or (loan_date_str != stored_loan_date_str) or (abs(rate_val - nomura_rate_val) > 1e-5):
             current_settings["nomura_loan_man"] = loan_in
             current_settings["nomura_loan_date"] = loan_date_str
             current_settings["nomura_rate"] = rate_val
             st.session_state["user_settings"] = current_settings
             save_user_settings(current_settings, gh_token, gh_repo)
+            st.toast("💾 借入設定（金額・起算日）を記憶しました")
 
         nomura_daily = calc_nomura_daily_interest(loan_in, rate=rate_val)
         nomura_monthly = int(round(nomura_daily * 30.0))
