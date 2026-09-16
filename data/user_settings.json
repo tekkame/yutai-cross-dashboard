@@ -1,5 +1,6 @@
 {
   "nomura_loan_man": 0.0,
+  "nomura_loan_date": "2026-09-01",
   "nomura_rate": 0.024,
   "nikko_lend_days": 14,
   "nikko_mode": "auto",

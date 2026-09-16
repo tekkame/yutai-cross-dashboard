@@ -207,7 +207,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v11.2 (Auto Lend Days Engine & Multi-Year Calendar)"
+APP_VERSION = "v11.3 (Nomura Loan Date & Total Benefit Analyzer)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -952,6 +952,7 @@ def persist_watchlist(current_list: List[str], gas_url: str, gh_token: str, gh_r
 # --- ユーザー設定（野村担保ローン借入額・日興貸株日数）永続化マネージャー ---
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "nomura_loan_man": 0.0,
+    "nomura_loan_date": "2026-09-01",
     "nomura_rate": DEFAULT_NOMURA_RATE,
     "nikko_lend_days": 14,
     "nikko_mode": "auto",
@@ -981,9 +982,10 @@ def save_user_settings(settings: Dict[str, Any], gh_token: str = "", gh_repo: st
         pass
     if gh_token and gh_repo:
         loan_v = settings.get("nomura_loan_man", 0)
+        date_v = settings.get("nomura_loan_date", "2026-09-01")
         mode_v = settings.get("nikko_mode", "auto")
         days_v = settings.get("nikko_lend_days", 14)
-        msg = f"Save user settings (Nomura Loan: {loan_v}万, Mode: {mode_v}, Nikko Days: {days_v}d)"
+        msg = f"Save user settings (Nomura Loan: {loan_v}万 on {date_v}, Mode: {mode_v}, Nikko Days: {days_v}d)"
         t_gh = threading.Thread(
             target=_sync_to_github_worker,
             args=(gh_token, gh_repo, json_str, msg, "data/user_settings.json"),
@@ -1392,6 +1394,20 @@ def main():
             step=10.0,
             help="野村證券Web担保ローンの借入金額を入力。自動記憶されリロード後も保持されます。"
         )
+
+        stored_loan_date_str = str(current_settings.get("nomura_loan_date", "2026-09-01"))
+        try:
+            stored_loan_date = dt.datetime.strptime(stored_loan_date_str, "%Y-%m-%d").date()
+        except Exception:
+            stored_loan_date = dt.date(2026, 9, 1)
+
+        loan_date_in = st.date_input(
+            "借入日 (利息起算日)",
+            value=stored_loan_date,
+            help="野村Webローンで実際に借入を行った（または予定している）日付。利息日数の起算日となります。"
+        )
+        loan_date_str = loan_date_in.strftime("%Y-%m-%d")
+
         nomura_rate_val = float(current_settings.get("nomura_rate", DEFAULT_NOMURA_RATE))
         rate_percent_in = st.number_input(
             "担保ローン金利 (%)",
@@ -1405,8 +1421,9 @@ def main():
         rate_val = rate_percent_in / 100.0
 
         # 設定変更時の自動記憶
-        if (loan_in != nomura_loan_val) or (abs(rate_val - nomura_rate_val) > 1e-5):
+        if (loan_in != nomura_loan_val) or (loan_date_str != stored_loan_date_str) or (abs(rate_val - nomura_rate_val) > 1e-5):
             current_settings["nomura_loan_man"] = loan_in
+            current_settings["nomura_loan_date"] = loan_date_str
             current_settings["nomura_rate"] = rate_val
             st.session_state["user_settings"] = current_settings
             save_user_settings(current_settings, gh_token, gh_repo)
@@ -1414,12 +1431,23 @@ def main():
         nomura_daily = calc_nomura_daily_interest(loan_in, rate=rate_val)
         nomura_monthly = int(round(nomura_daily * 30.0))
 
+        # 経過日数と累計利息の計算 (本日まで / 現渡完了まで)
+        today_d = dt.date.today()
+        elapsed_days = max(1, (today_d - loan_date_in).days + 1)
+        nomura_accrued = nomura_daily * elapsed_days
+
+        # 直近代表（9月末）現渡受渡日（2026-10-02等）までの総日数・総見込利息
+        _, _, _, close_settle_9m = calc_stock_lend_days("2026-09")
+        total_loan_days = max(elapsed_days, (close_settle_9m - loan_date_in).days + 1)
+        nomura_expected_total = nomura_daily * total_loan_days
+
         st.markdown(
-            f'<div style="background:#0f172a; border:1px solid #3b82f6; border-radius:6px; padding:0.45rem 0.65rem; margin-bottom:0.6rem;">'
-            f'<div style="color:#93c5fd; font-size:11px; font-weight:600;">💡 借入1日あたりの手数料 (利息)</div>'
-            f'<div style="color:#ffffff; font-size:16.5px; font-weight:bold; font-family:\'JetBrains Mono\', monospace; margin:2px 0;">¥{nomura_daily:,} <span style="font-size:11px; font-weight:normal; color:#94a3b8;">/日</span></div>'
-            f'<div style="color:#94a3b8; font-size:10.5px;">月間換算(30日): ¥{nomura_monthly:,} /月 (年利 {rate_percent_in:.2f}%)</div>'
-            f'<div style="color:#6ee7b7; font-size:10px; margin-top:2px;">💾 金額はクラウド・ローカルに記憶済</div>'
+            f'<div style="background:#0f172a; border:1px solid #3b82f6; border-radius:6px; padding:0.5rem 0.65rem; margin-bottom:0.6rem;">'
+            f'<div style="color:#93c5fd; font-size:11px; font-weight:600;">💡 野村利息シミュレーション</div>'
+            f'<div style="color:#ffffff; font-size:16px; font-weight:bold; font-family:\'JetBrains Mono\', monospace; margin:2px 0;">¥{nomura_daily:,} <span style="font-size:11px; font-weight:normal; color:#94a3b8;">/日</span></div>'
+            f'<div style="color:#cbd5e1; font-size:11px; margin-top:3px;">📅 借入日({loan_date_in.strftime("%m/%d")})〜本日: <b style="color:#38bdf8;">{elapsed_days}日間</b> ➔ <b style="color:#fde68a;">¥{nomura_accrued:,}</b></div>'
+            f'<div style="color:#94a3b8; font-size:10.5px; margin-top:2px;">🏁 現渡受渡({close_settle_9m.strftime("%m/%d")})まで: <b>{total_loan_days}日間</b> ➔ <b style="color:#c084fc;">¥{nomura_expected_total:,}</b></div>'
+            f'<div style="color:#6ee7b7; font-size:10px; margin-top:3px;">💾 借入条件はクラウド・ローカルに記憶済</div>'
             f'</div>',
             unsafe_allow_html=True
         )
@@ -1563,6 +1591,7 @@ def main():
 
     # ステータスバー (インデントなしで安全に描画)
     nikko_status_label = f"銘柄別自動 ({auto_days_9m}日等)" if new_mode == "auto" else f"{effective_lend_days}日分"
+    nomura_status_str = f"¥{nomura_daily:,}/日 (累計:¥{nomura_accrued:,})" if loan_in > 0 else "借入なし"
     status_bar_html = (
         f'<div class="status-bar">'
         f'<div class="status-bar-title">⚡ <b>優待クロス在庫トラッカー</b> <span style="font-size:11px;font-weight:normal;color:#94a3b8;">({APP_VERSION})</span></div>'
@@ -1570,7 +1599,7 @@ def main():
         f'<span class="tag tag-green">{data_source_msg}</span>'
         f'<span class="tag tag-blue">最新取得: {stats.get("latest_ts", "―")}</span>'
         f'<span class="tag tag-amber">⭐ 監視中: {stats.get("watch_count", 0)}銘柄</span>'
-        f'<span class="tag tag-purple">🏦 野村利息: ¥{nomura_daily:,}/日</span>'
+        f'<span class="tag tag-purple">🏦 野村利息: {nomura_status_str}</span>'
         f'<span class="tag tag-gray">⏱️ 日興基準: {nikko_status_label}</span>'
         f'</div>'
         f'</div>'
@@ -1584,9 +1613,31 @@ def main():
 
     if not watch_df.empty:
         total_funds = watch_df[watch_df["funds_yen"] < 99999990]["funds_yen"].sum()
-        total_nikko_cost = watch_df["nikko_cost"].sum()
+        total_nikko_cost = int(watch_df["nikko_cost"].sum())
+        total_yutai_val = int(sum(to_float(r.get("yutai_value")) or 0 for _, r in watch_df.iterrows()))
         valid_profits = watch_df["net_profit_nikko"].dropna()
         total_profit = valid_profits.sum() if not valid_profits.empty else None
+
+        # 野村利息の合算: 借入がある場合は現渡完了までの総見込利息を適用（借入なしなら0円）
+        nomura_cost_applied = int(nomura_expected_total) if loan_in > 0 else 0
+        total_combined_cost = total_nikko_cost + nomura_cost_applied
+        final_net_profit = (total_yutai_val - total_combined_cost) if total_yutai_val > 0 else (0 - total_combined_cost)
+
+        if total_combined_cost > 0 and total_yutai_val > 0:
+            roi_ratio = total_yutai_val / float(total_combined_cost)
+            roi_str = f"{roi_ratio:.1f}倍"
+        else:
+            roi_str = "―"
+
+        if final_net_profit > 0:
+            net_profit_color = "#34d399"
+            net_profit_badge = f'<span style="background:#065f46; color:#a7f3d0; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">✨ プラス利益 ({roi_str}回収)</span>'
+        elif final_net_profit == 0:
+            net_profit_color = "#94a3b8"
+            net_profit_badge = '<span style="background:#334155; color:#cbd5e1; padding:2px 8px; border-radius:4px; font-size:11px;">±0円</span>'
+        else:
+            net_profit_color = "#f87171"
+            net_profit_badge = '<span style="background:#7f1d1d; color:#fca5a5; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">⚠️ コスト割れ注意</span>'
 
         funds_disp = f"¥{int(total_funds):,}" if total_funds > 0 else "―"
         cost_disp = f"¥{int(total_nikko_cost):,}" if total_nikko_cost > 0 else "¥0"
@@ -1636,9 +1687,50 @@ def main():
 
         all_rows_html = "".join(rows_html_list)
 
+        # 総合収支・コスト対効果分析カード
+        benefit_summary_card = (
+            f'<div style="background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); border: 1px solid #6366f1; border-radius: 8px; padding: 0.65rem 0.9rem; margin-bottom: 0.6rem; box-shadow: 0 4px 12px rgba(0,0,0,0.25);">'
+            f'<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.4rem; border-bottom:1px solid #334155; padding-bottom:0.35rem;">'
+            f'<div style="color:#c7d2fe; font-weight:700; font-size:13px; display:flex; align-items:center; gap:6px;">'
+            f'💎 <b>優待クロス 総合収支 ＆ コスト対効果分析</b> '
+            f'<span style="color:#94a3b8; font-size:10.5px; font-weight:normal;">(日興クロス手数料 ＋ 野村Webローン利息 vs 優待総価値)</span>'
+            f'</div>'
+            f'<div>{net_profit_badge}</div>'
+            f'</div>'
+            f'<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.5rem; text-align:center;">'
+            f'<div style="background:rgba(15,23,42,0.6); border:1px solid #334155; border-radius:6px; padding:0.4rem;">'
+            f'<div style="font-size:10.5px; color:#94a3b8;">🎁 優待価値 合計</div>'
+            f'<div style="font-size:16px; font-weight:bold; color:#fde68a; font-family:\'JetBrains Mono\',monospace;">¥{total_yutai_val:,}</div>'
+            f'<div style="font-size:9.5px; color:#64748b;">(監視{len(watch_df)}銘柄)</div>'
+            f'</div>'
+            f'<div style="background:rgba(15,23,42,0.6); border:1px solid #334155; border-radius:6px; padding:0.4rem;">'
+            f'<div style="font-size:10.5px; color:#94a3b8;">⚡ 日興手数料計</div>'
+            f'<div style="font-size:16px; font-weight:bold; color:#cbd5e1; font-family:\'JetBrains Mono\',monospace;">¥{total_nikko_cost:,}</div>'
+            f'<div style="font-size:9.5px; color:#64748b;">({cost_sub_label})</div>'
+            f'</div>'
+            f'<div style="background:rgba(15,23,42,0.6); border:1px solid #334155; border-radius:6px; padding:0.4rem;">'
+            f'<div style="font-size:10.5px; color:#94a3b8;">🏦 野村利息 (現渡まで)</div>'
+            f'<div style="font-size:16px; font-weight:bold; color:#c084fc; font-family:\'JetBrains Mono\',monospace;">¥{nomura_cost_applied:,}</div>'
+            f'<div style="font-size:9.5px; color:#64748b;">(本日累計: ¥{nomura_accrued:,})</div>'
+            f'</div>'
+            f'<div style="background:rgba(15,23,42,0.6); border:1px solid #4338ca; border-radius:6px; padding:0.4rem;">'
+            f'<div style="font-size:10.5px; color:#a5b4fc;">💸 コスト総計 (日興+野村)</div>'
+            f'<div style="font-size:16px; font-weight:bold; color:#fca5a5; font-family:\'JetBrains Mono\',monospace;">¥{total_combined_cost:,}</div>'
+            f'<div style="font-size:9.5px; color:#818cf8;">(実質総費用)</div>'
+            f'</div>'
+            f'<div style="background:rgba(15,23,42,0.7); border:1px solid {net_profit_color}; border-radius:6px; padding:0.4rem; box-shadow: 0 0 10px rgba(52,211,153,0.15);">'
+            f'<div style="font-size:10.5px; color:{net_profit_color}; font-weight:600;">✨ 最終実質純手取</div>'
+            f'<div style="font-size:18px; font-weight:bold; color:{net_profit_color}; font-family:\'JetBrains Mono\',monospace;">{"+" if final_net_profit > 0 else ""}¥{final_net_profit:,}</div>'
+            f'<div style="font-size:9.5px; color:#94a3b8;">(優待価値 - 総コスト)</div>'
+            f'</div>'
+            f'</div>'
+            f'</div>'
+        )
+
         html_panel = (
+            f'{benefit_summary_card}'
             f'<div class="target-highlight-panel">'
-            f'<div class="target-header">⭐ 監視・目標銘柄ハイライト ({len(watch_df)}件ピン留め中)</div>'
+            f'<div class="target-header">⭐ 監視・目標銘柄 個別リスト ({len(watch_df)}件ピン留め中)</div>'
             f'<div class="target-summary">'
             f'<div class="target-summary-item"><span class="label">拘束資金合計:</span><span class="value">{funds_disp}</span></div>'
             f'<div class="target-summary-item"><span class="label">日興手数料計:</span><span class="value" style="color:#cbd5e1;">{cost_disp}</span> <span style="font-size:10.5px;color:#94a3b8;">({cost_sub_label})</span></div>'
