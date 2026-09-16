@@ -205,7 +205,7 @@ DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v10.1 (On-demand Direct Scraping & Daily Snapshot Trends)"
+APP_VERSION = "v10.2 (6-Stock Reset & Dynamic Watchlist Sync)"
 
 # ============================================================
 # 3. 堅牢なフォーマッター
@@ -929,6 +929,44 @@ def main():
         nikko_th=nikko_th,
         annual_rate=annual_rate
     )
+
+    # サイドバーに監視銘柄のクイック管理（直接コード追加・一覧確認・個別解除）を追加
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("##### ⭐ 監視銘柄の管理")
+        st.caption(f"現在 **{len(st.session_state['watchlist'])}** 銘柄を監視中")
+        
+        c_add1, c_add2 = st.columns([3, 2])
+        with c_add1:
+            new_code_in = st.text_input("コード追加", placeholder="例: 9831", label_visibility="collapsed", key="sidebar_add_code")
+        with c_add2:
+            if st.button("➕ 追加", use_container_width=True, key="sidebar_btn_add"):
+                c_clean = fmt_code(new_code_in.strip())
+                if c_clean and c_clean not in st.session_state["watchlist"]:
+                    st.session_state["watchlist"].append(c_clean)
+                    persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo, trigger_code=c_clean)
+                    st.toast(f"✅ {c_clean} を監視リストに追加しました")
+                    st.rerun()
+                elif c_clean in st.session_state["watchlist"]:
+                    st.toast("既に監視リストに登録されています")
+
+        if st.session_state["watchlist"]:
+            with st.expander("登録中銘柄の一覧・解除", expanded=False):
+                for wc in list(st.session_state["watchlist"]):
+                    w_name = ""
+                    if not df_analyzed.empty:
+                        m_names = df_analyzed[df_analyzed["code"] == wc]["name"].values
+                        if len(m_names) > 0:
+                            w_name = str(m_names[0])
+                    c_row1, c_row2 = st.columns([4, 1])
+                    with c_row1:
+                        st.markdown(f"**{wc}** {w_name}")
+                    with c_row2:
+                        if st.button("❌", key=f"del_w_{wc}", help=f"{wc} を監視から解除"):
+                            st.session_state["watchlist"].remove(wc)
+                            persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo, trigger_code=wc)
+                            st.toast(f"🗑️ {wc} を解除しました")
+                            st.rerun()
 
     # ステータスバー (インデントなしで安全に描画)
     status_bar_html = (
