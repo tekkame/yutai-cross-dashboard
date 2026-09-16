@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import calendar
 import datetime as dt
+import html
 import io
 import json
 import os
@@ -25,6 +26,13 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+# 日本標準時 (JST = UTC+9) 定義（Streamlit Cloud UTC環境での時刻ズレ完全解消）
+JST = dt.timezone(dt.timedelta(hours=9))
+
+def get_now_jst() -> dt.datetime:
+    """常に日本標準時（JST）の現在日時（naive datetime）を返す"""
+    return dt.datetime.now(JST).replace(tzinfo=None)
 
 import altair as alt
 import numpy as np
@@ -207,7 +215,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v11.4 (Lend Days Sync & Breakeven Wait Analyzer)"
+APP_VERSION = "v11.5 (JST Timezone & Precise Rights Sync)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -376,8 +384,10 @@ def get_current_execution_date(now_dt: Optional[dt.datetime] = None) -> dt.date:
     """現在日時から今注文を出した場合の東証約定日を判定
     - 平日 15:30 より前: 当日約定
     - 平日 15:30 以降 または 東証休業日: 翌東証営業日約定
+    ★Streamlit Cloud (UTC) 環境対策: now_dt が未指定時は常に JST (日本時間) を使用
     """
-    if now_dt is None: now_dt = dt.datetime.now()
+    if now_dt is None:
+        now_dt = get_now_jst()
     today = now_dt.date()
     if is_tse_business_day(today) and now_dt.time() < dt.time(15, 30):
         return today
@@ -386,22 +396,50 @@ def get_current_execution_date(now_dt: Optional[dt.datetime] = None) -> dt.date:
         cur += dt.timedelta(days=1)
     return cur
 
-def parse_rights_month(val: Any) -> Tuple[int, int]:
-    """権利月文字列（例: '2026-09', '9月', '9', '2026/09', '20日'等）を解析して (month, day) を返す"""
+def parse_rights_month(val: Any) -> Tuple[Optional[int], int, int]:
+    """権利年月文字列（例: '2026-09-20', '2026-09', '2027/03/20', '9月20日', '9月', '9', '20日'等）を解析
+    戻り値: (year, month, day)
+    - year: 西暦年（指定がある場合。未指定なら None）
+    - month: 権利月 (1〜12)
+    - day: 権利日 (20日権利銘柄は 20, 月末権利銘柄は 0)
+    ★ISO日付 '2026-09-20' や '2026/09/20' の 20日判定＆年情報完全保持
+    """
     if val is None or str(val).strip() in ("", "-", "―", "nan", "None"):
-        return (9, 0)
+        return (None, 9, 0)
     s = str(val).strip()
-    day = 20 if "20日" in s or ("20" in s and "日" in s) else 0
-    m = re.search(r"(\d{4})[-/](\d{1,2})", s)
-    if m:
-        return (int(m.group(2)), day)
-    m = re.search(r"(\d{1,2})月", s)
-    if m:
-        return (int(m.group(1)), day)
-    m = re.search(r"^(\d{1,2})$", s)
-    if m:
-        return (int(m.group(1)), day)
-    return (9, day)
+    
+    # 明確に ISO 形式 YYYY-MM-DD や YYYY/MM/DD を抽出
+    m_full = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", s)
+    if m_full:
+        y = int(m_full.group(1))
+        m = int(m_full.group(2))
+        d_val = int(m_full.group(3))
+        d = 20 if d_val == 20 else (0 if d_val >= 28 else d_val)
+        return (y, m, d)
+
+    is_20th = bool(
+        re.search(r"20\s*日", s) or
+        re.search(r"[-/](?:20)(?:[^\d]|$)", s)
+    )
+
+    # YYYY-MM または YYYY/MM
+    m_ym = re.search(r"(\d{4})[-/](\d{1,2})", s)
+    if m_ym:
+        y = int(m_ym.group(1))
+        m = int(m_ym.group(2))
+        d = 20 if is_20th else 0
+        return (y, m, d)
+
+    # 4桁年なしの場合: "9月20日", "9月", "9"
+    d = 20 if is_20th else 0
+    m_m = re.search(r"(\d{1,2})\s*月", s)
+    if m_m:
+        return (None, int(m_m.group(1)), d)
+    m_digit = re.search(r"^(\d{1,2})$", s)
+    if m_digit:
+        return (None, int(m_digit.group(1)), d)
+
+    return (None, 9, d)
 
 def get_stock_rights_dates(year: int, month: int, day: int = 0) -> Tuple[dt.date, dt.date, dt.date, dt.date]:
     """対象年月の (権利確定日, 権利付最終売買日, 権利落ち日, 現渡受渡日) を算出"""
@@ -434,17 +472,24 @@ def calc_stock_lend_days(
     """対象銘柄の権利年月と現在日時から、今約定した場合の【想定貸株日数】を完全自動計算
     戻り値: (lend_days, exec_date, open_settle, close_settle)
     """
-    if now_dt is None: now_dt = dt.datetime.now()
+    if now_dt is None:
+        now_dt = get_now_jst()
     exec_d = get_current_execution_date(now_dt)
 
-    month, day = parse_rights_month(rights_val)
+    req_year, month, day = parse_rights_month(rights_val)
 
-    # ターゲット年を判定 (現在年で権利付最終日を過ぎていれば翌年)
-    year = exec_d.year
-    rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
-    if exec_d > last_trade:
-        year += 1
+    if req_year is not None:
+        year = req_year
         rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
+        if exec_d > last_trade:
+            year += 1
+            rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
+    else:
+        year = exec_d.year
+        rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
+        if exec_d > last_trade:
+            year += 1
+            rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
 
     # 新規売建受渡日 (約定日の2営業日後)
     open_settle = get_settlement_date(exec_d)
@@ -1138,6 +1183,7 @@ def analyze_stocks(
     annual_rate: float = 0.014,
     nikko_lend_days: Optional[int] = None,
     nomura_rate: float = DEFAULT_NOMURA_RATE,
+    has_nomura_loan: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, Any], List[str]]:
     if df_hist is None or df_hist.empty:
         return pd.DataFrame(), {}, []
@@ -1319,7 +1365,7 @@ def analyze_stocks(
                 net_profit_nikko = int(round(yutai_val - nikko_cost))
                 net_profit_nikko_str = f"¥{net_profit_nikko:,}"
                 net_profit = net_profit_nikko
-            nomura_item_daily_interest = int(round(funds_yen * nomura_rate / 365.0))
+            nomura_item_daily_interest = int(round(funds_yen * nomura_rate / 365.0)) if has_nomura_loan else 0
             if d_n:
                 try:
                     daily_cost = funds_yen * annual_rate / 365.0
@@ -1595,7 +1641,8 @@ def main():
         nikko_th=nikko_th,
         annual_rate=annual_rate,
         nikko_lend_days=effective_lend_days,
-        nomura_rate=rate_val
+        nomura_rate=rate_val,
+        has_nomura_loan=(loan_in is not None and loan_in > 0)
     )
 
     # サイドバーに監視銘柄のクイック管理（直接コード追加・一覧確認・個別解除）を追加
@@ -1814,12 +1861,14 @@ def main():
     if not alert_stocks.empty:
         alert_chips = []
         for _, ar in alert_stocks.head(6).iterrows():
-            c = ar["code"]
-            n = ar["name"]
-            drop_tag = ar["nikko_display"] if ar["is_nikko_drop"] else ar["sbi_display"]
+            c_esc = html.escape(str(ar["code"]))
+            n_esc = html.escape(str(ar["name"]))
+            raw_drop = ar["nikko_display"] if ar["is_nikko_drop"] else ar["sbi_display"]
+            drop_tag_esc = html.escape(str(raw_drop))
+            sig_esc = html.escape(str(ar["signal"]))
             alert_chips.append(
                 f'<span style="background:rgba(239,68,68,0.18); border:1px solid rgba(239,68,68,0.45); border-radius:4px; padding:2px 7px; font-size:11px; margin-right:4px; display:inline-block;">'
-                f'<b style="color:#fecaca;">[{c}] {n}</b>: <span style="color:#f87171;font-weight:600;">{drop_tag}</span> ({ar["signal"]})'
+                f'<b style="color:#fecaca;">[{c_esc}] {n_esc}</b>: <span style="color:#f87171;font-weight:600;">{drop_tag_esc}</span> ({sig_esc})'
                 f'</span>'
             )
         alert_banner_html = (
@@ -1911,6 +1960,17 @@ def main():
         filtered_df = filtered_df.sort_values(by=["watch_rank", "nikko_now"], ascending=[True, False], na_position="last")
     else:
         filtered_df = filtered_df.sort_values(by=["watch_rank", "signal_rank", "funds_yen"], ascending=[True, True, True])
+
+    # ----------------------------------------------------
+    # 検索・絞込・ソート変更時の data_editor インデックスズレ防止
+    # 行構成が変わる操作を検知した際は editor_version を即時更新し古い行キャッシュを完全消去
+    # ----------------------------------------------------
+    filter_state_sig = f"{query}_{','.join(sorted(signal_filter))}_{only_watch}_{only_nikko}_{sort_mode}"
+    if "last_filter_state_sig" not in st.session_state:
+        st.session_state["last_filter_state_sig"] = filter_state_sig
+    elif st.session_state["last_filter_state_sig"] != filter_state_sig:
+        st.session_state["last_filter_state_sig"] = filter_state_sig
+        st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
 
     # ----------------------------------------------------
     # タブ構成
