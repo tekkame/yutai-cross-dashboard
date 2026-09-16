@@ -1820,7 +1820,28 @@ def main():
     with st.sidebar:
         st.markdown("---")
         st.markdown("##### ⭐ 監視銘柄の管理")
-        st.caption(f"現在 **{len(st.session_state['watchlist'])}** 銘柄を監視中")
+
+        # 全CSVマスタからコード->銘柄名マップを生成（他月銘柄でも名前を確実に表示）
+        global_name_map: Dict[str, str] = {}
+        if not df_analyzed.empty:
+            for _, r in df_analyzed.iterrows():
+                global_name_map[str(r["code"])] = str(r["name"])
+        if DATA_DIR.exists():
+            for mf in sorted(DATA_DIR.glob("master_*.csv")):
+                try:
+                    m_df = pd.read_csv(mf, usecols=["コード", "銘柄名"])
+                    for _, r in m_df.iterrows():
+                        c_std = fmt_code(r["コード"])
+                        if c_std not in global_name_map:
+                            global_name_map[c_std] = str(r["銘柄名"])
+                except Exception:
+                    pass
+
+        cur_codes_set = set(df_analyzed["code"].tolist()) if not df_analyzed.empty else set()
+        cur_month_watched = [c for c in st.session_state["watchlist"] if c in cur_codes_set]
+        other_month_watched = [c for c in st.session_state["watchlist"] if c not in cur_codes_set]
+
+        st.caption(f"{chosen_month}対象: **{len(cur_month_watched)}** 銘柄 (全月合計: {len(st.session_state['watchlist'])} 銘柄)")
         
         c_add1, c_add2 = st.columns([3, 2])
         with c_add1:
@@ -1838,23 +1859,36 @@ def main():
                     st.toast("既に監視リストに登録されています")
 
         if st.session_state["watchlist"]:
-            with st.expander("登録中銘柄の一覧・解除", expanded=False):
-                for wc in list(st.session_state["watchlist"]):
-                    w_name = ""
-                    if not df_analyzed.empty:
-                        m_names = df_analyzed[df_analyzed["code"] == wc]["name"].values
-                        if len(m_names) > 0:
-                            w_name = str(m_names[0])
-                    c_row1, c_row2 = st.columns([4, 1])
-                    with c_row1:
-                        st.markdown(f"**{wc}** {w_name}")
-                    with c_row2:
-                        if st.button("❌", key=f"del_w_{wc}", help=f"{wc} を監視から解除"):
-                            st.session_state["watchlist"].remove(wc)
-                            st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
-                            persist_watchlist(st.session_state["watchlist"], gh_token, gh_repo, trigger_code=wc)
-                            st.toast(f"🗑️ {wc} を解除しました")
-                            st.rerun()
+            with st.expander(f"登録中銘柄の一覧・解除 ({len(st.session_state['watchlist'])}件)", expanded=False):
+                if cur_month_watched:
+                    st.markdown(f"**【{chosen_month} 対象銘柄】**")
+                    for wc in cur_month_watched:
+                        w_name = global_name_map.get(wc, "")
+                        c_row1, c_row2 = st.columns([4, 1])
+                        with c_row1:
+                            st.markdown(f"⭐ **{wc}** {w_name}")
+                        with c_row2:
+                            if st.button("❌", key=f"del_w_{wc}", help=f"{wc} を監視から解除"):
+                                st.session_state["watchlist"].remove(wc)
+                                st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
+                                persist_watchlist(st.session_state["watchlist"], gh_token, gh_repo, trigger_code=wc)
+                                st.toast(f"🗑️ {wc} を解除しました")
+                                st.rerun()
+
+                if other_month_watched:
+                    st.markdown(f"<div style='font-size:11px; color:#94a3b8; margin-top:0.4rem;'><b>【他月で登録済みの銘柄】</b> (年2回優待等は該当月に自動反映)</div>", unsafe_allow_html=True)
+                    for wc in other_month_watched:
+                        w_name = global_name_map.get(wc, "")
+                        c_row1, c_row2 = st.columns([4, 1])
+                        with c_row1:
+                            st.markdown(f"<span style='color:#94a3b8;'>○ <b>{wc}</b> {w_name}</span>", unsafe_allow_html=True)
+                        with c_row2:
+                            if st.button("❌", key=f"del_w_other_{wc}", help=f"{wc} を監視から解除"):
+                                st.session_state["watchlist"].remove(wc)
+                                st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
+                                persist_watchlist(st.session_state["watchlist"], gh_token, gh_repo, trigger_code=wc)
+                                st.toast(f"🗑️ {wc} を解除しました")
+                                st.rerun()
 
     # ステータスバー (インデントなしで安全に描画)
     nikko_status_label = f"銘柄別自動 ({auto_days_month}日等)" if new_mode == "auto" else f"{effective_lend_days}日分"
