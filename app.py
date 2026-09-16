@@ -152,7 +152,7 @@ html, body, [class*="css"] {
 
 .target-item-row {
     display: grid;
-    grid-template-columns: 46px 115px 65px 90px 75px 170px auto 65px 65px 68px 45px 65px;
+    grid-template-columns: 46px 110px 65px 90px 75px 160px auto 70px 85px 65px 68px 45px 65px;
     gap: 0.35rem;
     align-items: center;
     padding: 0.2rem 0;
@@ -215,7 +215,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v11.5 (JST Timezone & Precise Rights Sync)"
+APP_VERSION = "v11.6 (Wait Savings & Continuous Check UX)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -1373,6 +1373,16 @@ def analyze_stocks(
                         limit_days_int = int(round(yutai_val / daily_cost))
                 except Exception: pass
 
+        # 待機節約額（あと1日・2日待機した場合に削減できる日興貸株料）
+        saving_1d = 0
+        saving_2d = 0
+        saving_str = "―"
+        if funds_yen < 99999990 and funds_yen > 0:
+            saving_1d = int(round(funds_yen * DEFAULT_NIKKO_LEND_RATE / 365.0))
+            saving_2d = saving_1d * 2
+            if saving_1d > 0:
+                saving_str = f"-¥{saving_1d:,} / -¥{saving_2d:,}"
+
         # 損益分岐待機日数（優待価値から現行コストを引いた余力日数）
         wait_days = None
         wait_label = "―"
@@ -1398,12 +1408,15 @@ def analyze_stocks(
 
         results.append({
             "watch": is_watch,
-            "watch_rank": 0 if is_watch else 1,  # 監視中を最優先ピン留め
+            "watch_rank": 0 if is_watch else 1,  # 監視中フラグ
             "code": code,
             "name": name,
             "stock_price": stock_price,
             "funds_yen": funds_yen,
             "funds_man_str": fmt_funds_man(funds_yen),
+            "saving_1d": saving_1d,
+            "saving_2d": saving_2d,
+            "saving_str": saving_str,
             "signal": signal,
             "signal_rank": signal_rank,
             "sbi_change": sbi_change,
@@ -1713,6 +1726,9 @@ def main():
         total_yutai_val = int(sum(to_float(r.get("yutai_value")) or 0 for _, r in watch_df.iterrows()))
         valid_profits = watch_df["net_profit_nikko"].dropna()
         total_profit = valid_profits.sum() if not valid_profits.empty else None
+        total_saving_1d = int(watch_df["saving_1d"].sum()) if "saving_1d" in watch_df.columns else 0
+        total_saving_2d = total_saving_1d * 2
+        saving_disp = f"-¥{total_saving_1d:,}" if total_saving_1d > 0 else "¥0"
 
         # 野村利息の合算: 借入がある場合は現渡完了までの総見込利息を適用（借入なしなら0円）
         nomura_cost_applied = int(nomura_expected_total) if loan_in > 0 else 0
@@ -1774,6 +1790,7 @@ def main():
                 f'<div style="font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{trend_plain}">{trend_html_val}</div>'
                 f'<div class="target-yutai" title="{y_val}">{y_val}</div>'
                 f'<div style="text-align:right; font-weight:600; color:#cbd5e1;">{n_cost_str}</div>'
+                f'<div style="text-align:center; font-size:10px; color:#38bdf8;" title="1日待機/2日待機で削減される日興貸株料">{r.get("saving_str", "―")}</div>'
                 f'<div style="text-align:right; font-weight:600; color:#86efac;">{n_net_str}</div>'
                 f'<div style="text-align:center; font-size:11px; color:#fde68a;">{r.get("wait_label", "―")}</div>'
                 f'<div style="text-align:right; color:#86efac;">{y_pct}</div>'
@@ -1831,12 +1848,13 @@ def main():
             f'<div class="target-summary">'
             f'<div class="target-summary-item"><span class="label">拘束資金合計:</span><span class="value">{funds_disp}</span></div>'
             f'<div class="target-summary-item"><span class="label">日興手数料計:</span><span class="value" style="color:#cbd5e1;">{cost_disp}</span> <span style="font-size:10.5px;color:#94a3b8;">({cost_sub_label})</span></div>'
+            f'<div class="target-summary-item"><span class="label">1日待機節約:</span><span class="value" style="color:#38bdf8;">{saving_disp}</span> <span style="font-size:10.5px;color:#94a3b8;">(2日: -¥{total_saving_2d:,})</span></div>'
             f'<div class="target-summary-item"><span class="label">見込実質手取:</span><span class="value" style="color:#86efac;">{profit_disp}</span></div>'
             f'<div class="target-summary-item"><span class="label">野村借入利息:</span><span class="value" style="color:#c084fc;">¥{nomura_daily:,}</span> <span style="font-size:10.5px;color:#94a3b8;">/日</span></div>'
             f'</div>'
             f'<div style="margin-top: 0.35rem; background: #0f172a; border-radius: 4px; padding: 0.4rem 0.6rem;">'
             f'<div class="target-item-row" style="border-bottom: 1px solid #334155; font-weight: bold; color: #94a3b8; padding-bottom: 0.2rem;">'
-            f'<div>コード</div><div>銘柄名</div><div style="text-align:right;">最低取得価格</div><div style="text-align:right;">日興最新</div><div style="text-align:center;">SBI最新</div><div>残数推移</div><div>優待内容</div><div style="text-align:right;">日興手数料</div><div style="text-align:right;">実質手取</div><div style="text-align:center;">損益分岐</div><div style="text-align:right;">利回り</div><div style="text-align:center;">判定</div>'
+            f'<div>コード</div><div>銘柄名</div><div style="text-align:right;">最低取得価格</div><div style="text-align:right;">日興最新</div><div style="text-align:center;">SBI最新</div><div>残数推移</div><div>優待内容</div><div style="text-align:right;">日興手数料</div><div style="text-align:center;">待機節約</div><div style="text-align:right;">実質手取</div><div style="text-align:center;">損益分岐</div><div style="text-align:right;">利回り</div><div style="text-align:center;">判定</div>'
             f'</div>'
             f'<div style="max-height: 155px; overflow-y: auto; padding-right: 4px;">'
             f'{all_rows_html}'
@@ -1882,27 +1900,21 @@ def main():
     # ----------------------------------------------------
     # コントロールバー
     # ----------------------------------------------------
-    c_f1, c_f2, c_f3, c_f4, c_f5, c_f6, c_f7, c_f8 = st.columns([1.8, 1.2, 0.8, 0.8, 1.4, 1.1, 1.0, 1.3])
+    c_f1, c_f2, c_f3, c_f4, c_f5, c_f6, c_f7 = st.columns([1.8, 1.3, 0.9, 0.9, 1.6, 1.1, 1.3])
     with c_f1: query = st.text_input("検索", placeholder="コード/銘柄名/優待内容", label_visibility="collapsed")
     with c_f2: signal_filter = st.multiselect("絞込", options=["🔴 今夜確保", "🔥 補充", "🚨 SBI急変", "🔴 即確保", "🟡 要監視", "🟢 待機可", "⚪ 枯渇"], default=[], label_visibility="collapsed")
     with c_f3: only_watch = st.checkbox("⭐ 監視のみ", value=False)
     with c_f4: only_nikko = st.checkbox("日興あり", value=False)
     with c_f5:
         sort_mode = st.selectbox("並び替え", options=[
+            "🔄 ソートなし (標準)",
             "💴 最低取得価格が安い順", "💰 最低取得価格が高い順", "⚡ シグナル優先",
             "🎁 実質純利益が高い順", "📈 利回りが高い順", "📉 日興在庫が多い順"
         ], label_visibility="collapsed")
     with c_f6:
-        if st.button("🔄 6銘柄初期化", use_container_width=True, help="監視リストをご指定の初期6銘柄にリセットします"):
-            st.session_state["watchlist"] = DEFAULT_WATCHLIST.copy()
-            st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
-            persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo)
-            st.toast("指定6銘柄にリセットしました")
-            st.rerun()
-    with c_f7:
         if st.button("🔄 再読込", use_container_width=True):
             st.rerun()
-    with c_f8:
+    with c_f7:
         if st.button("🚀 最新取得", use_container_width=True):
             with st.spinner("⚡ 最新在庫データを直接スクレイピング中 (数秒)..."):
                 ok, msg = run_direct_scrape()
@@ -1947,19 +1959,23 @@ def main():
             filtered_df["yutai_content_raw"].astype(str).str.lower().str.contains(q)
         ]
 
-    # ソート: 監視銘柄（⭐）を常に最上部にピン留めするため watch_rank を第1キーとする
-    if "最低取得価格が安い順" in sort_mode or "取得資金が安い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["watch_rank", "funds_yen"], ascending=[True, True])
+    # ソート: ユーザーが明示的に指定した場合のみ並び替え
+    # ★重要改善: チェックボックス操作時に行が勝手に最上部に飛んで連続チェックできなくなる不具合を根絶するため、
+    # watch_rank による強制並び替えは完全撤廃（監視銘柄は上部ピン留めカードで常時確認可能）。
+    if sort_mode == "🔄 ソートなし (標準)":
+        pass  # 元の順序（スクレイピング/マスター順）を完全維持
+    elif "最低取得価格が安い順" in sort_mode or "取得資金が安い順" in sort_mode:
+        filtered_df = filtered_df.sort_values(by=["funds_yen"], ascending=[True])
     elif "最低取得価格が高い順" in sort_mode or "取得資金が高い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["watch_rank", "funds_yen"], ascending=[True, False])
+        filtered_df = filtered_df.sort_values(by=["funds_yen"], ascending=[False])
     elif "実質純利益が高い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["watch_rank", "net_profit"], ascending=[True, False], na_position="last")
+        filtered_df = filtered_df.sort_values(by=["net_profit"], ascending=[False], na_position="last")
     elif "利回りが高い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["watch_rank", "yield_pct"], ascending=[True, False], na_position="last")
+        filtered_df = filtered_df.sort_values(by=["yield_pct"], ascending=[False], na_position="last")
     elif "日興在庫が多い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["watch_rank", "nikko_now"], ascending=[True, False], na_position="last")
-    else:
-        filtered_df = filtered_df.sort_values(by=["watch_rank", "signal_rank", "funds_yen"], ascending=[True, True, True])
+        filtered_df = filtered_df.sort_values(by=["nikko_now"], ascending=[False], na_position="last")
+    elif "シグナル優先" in sort_mode:
+        filtered_df = filtered_df.sort_values(by=["signal_rank", "funds_yen"], ascending=[True, True])
 
     # ----------------------------------------------------
     # 検索・絞込・ソート変更時の data_editor インデックスズレ防止
@@ -2004,6 +2020,7 @@ def main():
                 "残数推移": str(r.get("trend_combined", "―")),
                 "優待内容": str(r.get("yutai_content", "―")),
                 "日興手数料": n_cost_display,
+                "待機節約": str(r.get("saving_str", "―")),
                 "実質手取": str(r.get("net_profit_nikko_str", "―")),
                 "損益分岐": str(r.get("wait_label", "―")),
                 "その他証券": str(r.get("other_brokers", "―")),
@@ -2035,7 +2052,7 @@ def main():
                 hide_index=True,
                 height=580,
                 column_config={
-                    "⭐": st.column_config.CheckboxColumn("⭐", width="small", help="監視・ピン留め（チェックで最上部に固定＆多層自動保存）"),
+                    "⭐": st.column_config.CheckboxColumn("⭐", width="small", help="監視・目標銘柄（チェックで上部ピン留めカードに追加＆多層自動保存）"),
                     "コード": st.column_config.TextColumn("コード", width="small"),
                     "銘柄": st.column_config.TextColumn("銘柄", width="medium"),
                     "最低取得価格": st.column_config.TextColumn("最低取得価格", width="small", help="優待取得に必要な概算資金（万円単位）"),
@@ -2044,6 +2061,7 @@ def main():
                     "残数推移": st.column_config.TextColumn("残数推移 (日興/SBI)", width="medium", help="日興およびSBIの在庫トレンド (↘減少/↗増加/維持/急変)"),
                     "優待内容": st.column_config.TextColumn("優待内容", width="large", help="優待品目・金額・数量"),
                     "日興手数料": st.column_config.TextColumn("日興手数料", width="small", help=nikko_col_help),
+                    "待機節約": st.column_config.TextColumn("待機節約 (1日/2日)", width="small", help="日興一般信用売りをあと1日または2日待機した場合に節約できる貸株料（年1.9%）。在庫に余裕があれば待機することで手数料を低減できます"),
                     "実質手取": st.column_config.TextColumn("実質手取", width="small", help="優待価値(円)から日興優待クロスコストを差し引いた実質純利益"),
                     "損益分岐": st.column_config.TextColumn("損益分岐 (待機可)", width="small", help="日興貸株料＋野村利息が優待価値を超えて赤字転落するまでの限界待機日数"),
                     "その他証券": st.column_config.TextColumn("その他証券", width="small", help="カブ・楽天・GMO等の残数・信号"),
