@@ -143,7 +143,7 @@ html, body, [class*="css"] {
 
 .target-item-row {
     display: grid;
-    grid-template-columns: 65px 160px 75px 55px 75px 75px auto;
+    grid-template-columns: 55px 130px 70px 110px 95px 190px auto 55px 75px;
     gap: 0.4rem;
     align-items: center;
     padding: 0.2rem 0;
@@ -157,10 +157,6 @@ html, body, [class*="css"] {
 
 .target-code { font-family: 'JetBrains Mono', monospace; color: #93c5fd; font-weight: 600; }
 .target-name { color: #f1f5f9; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.target-nikko { font-family: 'JetBrains Mono', monospace; text-align: right; }
-.target-sbi { font-family: 'JetBrains Mono', monospace; text-align: center; font-weight: bold; }
-.target-funds { font-family: 'JetBrains Mono', monospace; text-align: right; color: #cbd5e1; }
-.target-profit { font-family: 'JetBrains Mono', monospace; text-align: right; color: #86efac; font-weight: 600; }
 .target-yutai { color: #cbd5e1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
 
 div[data-testid="stVerticalBlock"] > div {
@@ -209,7 +205,7 @@ DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v9.0 (Unified Watchlist & Verified Cloud Persistence)"
+APP_VERSION = "v10.0 (Acute Drop Alerts & Compact Custom Layout)"
 
 # ============================================================
 # 3. 堅牢なフォーマッター
@@ -265,6 +261,44 @@ def fmt_signal(v: Any) -> str:
     if s in ("1", "1.0", "▲"): return "▲"
     if s in ("0", "0.0", "×", "✕"): return "×"
     return s
+
+def fmt_funds_man(funds_yen: Any) -> str:
+    """最低取得価格を万円単位で簡潔にフォーマット (例: 16.0万, 3.2万)"""
+    f = to_float(funds_yen)
+    if f is None or f >= 99999990 or f <= 0:
+        return "―"
+    man = f / 10000.0
+    if man >= 100:
+        return f"{int(round(man))}万"
+    return f"{man:.1f}万"
+
+def fmt_yutai_compact(content: str) -> str:
+    """優待内容から【100株】等の株数プレフィックスや冗長な注釈を除去し簡潔化"""
+    if not content or pd.isna(content):
+        return "―"
+    s = str(content).strip()
+    # 【100株】等の株数指定を除去
+    s = re.sub(r"【[\d,]+株[^】]*】", "", s)
+    # 【注：...】などの注記を除去
+    s = re.sub(r"【注：[^】]*】", "", s)
+    s = re.sub(r"\[[^\]]*\]", "", s)
+    s = s.strip()
+    if not s:
+        return "優待あり"
+    if len(s) > 28:
+        return s[:27] + "…"
+    return s
+
+def fmt_other_brokers(kabu_now: Any, rakuten_now: Any, gmo_now: str) -> str:
+    """カブ・楽天・GMO等のその他証券残数をコンパクトに連結"""
+    parts = []
+    k = fmt_qty(kabu_now)
+    if k != "―": parts.append(f"カブ:{k}")
+    r = fmt_qty(rakuten_now)
+    if r != "―": parts.append(f"楽天:{r}")
+    g = fmt_signal(gmo_now) if gmo_now not in ("―", "") else ""
+    if g and g != "―": parts.append(f"GMO:{g}")
+    return " | ".join(parts) if parts else "―"
 
 def safe_get_secret(key: str, default: str = "") -> str:
     """Streamlit Secrets が未設定の環境でも例外を投げずに安全に値を取得"""
@@ -567,6 +601,25 @@ def analyze_stocks(
 
     results: List[Dict[str, Any]] = []
 
+    # 直近3〜4件のスナップショットから銘柄別の推移マップを事前計算
+    trend_map: Dict[str, Dict[str, str]] = {}
+    recent_ts_list = all_timestamps[-4:] if len(all_timestamps) >= 4 else all_timestamps
+    if recent_ts_list and not df_hist.empty:
+        df_recent = df_hist[df_hist["timestamp"].isin(recent_ts_list)].copy()
+        for c_grp, g_df in df_recent.groupby("code"):
+            g_sorted = g_df.sort_values(by="dt", ascending=True) if "dt" in g_df.columns else g_df
+            n_vals = [fmt_qty(to_float(v)) for v in g_sorted["nikko"].tolist()]
+            s_raw = g_sorted["rtn_sbi"] if "rtn_sbi" in g_sorted.columns else (g_sorted["sbi"] if "sbi" in g_sorted.columns else [])
+            s_vals = [fmt_signal(v) for v in s_raw.tolist()]
+            
+            n_trend_str = "→".join(n_vals[-3:]) if n_vals else "―"
+            s_trend_str = "→".join(s_vals[-3:]) if s_vals else "―"
+            trend_map[str(c_grp)] = {
+                "nikko": n_trend_str,
+                "sbi": s_trend_str,
+                "combined": f"日興:{n_trend_str} | SBI:{s_trend_str}"
+            }
+
     for _, row in df_latest.iterrows():
         code = row.get("code", "")
         name = row.get("name", "")
@@ -590,20 +643,48 @@ def analyze_stocks(
 
         nikko_diff = (nikko_now - nikko_prev) if (nikko_now is not None and nikko_prev is not None) else None
 
+        # --- SBI 急変・悪化検知 ---
         is_sbi_sudden_drop = False
+        sbi_alert_tag = ""
         if prev_ts and sbi_prev != "―" and sbi_now != "―":
             if sbi_prev == "◎" and sbi_now == "▲":
                 sbi_change = "🚨急変(◎→▲)"
+                sbi_alert_tag = "🚨◎→▲"
                 is_sbi_sudden_drop = True
             elif sbi_prev == "◎" and sbi_now == "×":
                 sbi_change = "💥瞬殺(◎→×)"
+                sbi_alert_tag = "💥◎→×"
+                is_sbi_sudden_drop = True
+            elif sbi_prev == "▲" and sbi_now == "×":
+                sbi_change = "💥枯渇(▲→×)"
+                sbi_alert_tag = "💥▲→×"
                 is_sbi_sudden_drop = True
             elif sbi_prev != sbi_now:
                 sbi_change = f"{sbi_prev}→{sbi_now}"
+                sbi_alert_tag = f"{sbi_prev}→{sbi_now}"
             else:
                 sbi_change = f"{sbi_now}(維持)"
         else:
             sbi_change = sbi_now if sbi_now != "―" else "―"
+
+        # SBI 表示用（最新 + 変化が一目瞭然）
+        if sbi_alert_tag:
+            sbi_display = f"{sbi_now} ({sbi_alert_tag})"
+        else:
+            sbi_display = sbi_now
+
+        # --- 日興 急減検知 ---
+        is_nikko_drop = False
+        if nikko_diff is not None and nikko_diff < 0:
+            if nikko_diff <= -3000:
+                is_nikko_drop = True
+                nikko_display = f"{fmt_qty(nikko_now)} (🚨▼{abs(int(nikko_diff)):,})"
+            else:
+                nikko_display = f"{fmt_qty(nikko_now)} (▼{abs(int(nikko_diff)):,})"
+        elif nikko_diff is not None and nikko_diff > 0:
+            nikko_display = f"{fmt_qty(nikko_now)} (+{int(nikko_diff):,})"
+        else:
+            nikko_display = fmt_qty(nikko_now)
 
         is_refill = False
         if prev_ts:
@@ -624,7 +705,7 @@ def analyze_stocks(
         elif total_qty is not None and 0 < total_qty < 1000:
             signal = "🔴 即確保"
             signal_rank = 2
-        elif (nikko_now is not None and nikko_now < nikko_th) or (nikko_diff is not None and nikko_diff < -3000):
+        elif (nikko_now is not None and nikko_now < nikko_th) or is_nikko_drop:
             signal = "🟡 要監視"
             signal_rank = 3
         elif nikko_now is not None and nikko_now >= nikko_th:
@@ -660,6 +741,7 @@ def analyze_stocks(
             except Exception: pass
 
         is_watch = (code in watchlist)
+        c_trend = trend_map.get(str(code), {})
 
         results.append({
             "watch": is_watch,
@@ -668,10 +750,14 @@ def analyze_stocks(
             "name": name,
             "stock_price": stock_price,
             "funds_yen": funds_yen,
+            "funds_man_str": fmt_funds_man(funds_yen),
             "signal": signal,
             "signal_rank": signal_rank,
             "sbi_change": sbi_change,
+            "sbi_display": sbi_display,
             "is_sbi_drop": is_sbi_sudden_drop,
+            "is_nikko_drop": is_nikko_drop,
+            "nikko_display": nikko_display,
             "refill": "🔥補充" if is_refill else "",
             "is_refill": is_refill,
             "nikko_now": nikko_now,
@@ -680,10 +766,15 @@ def analyze_stocks(
             "kabu_now": kabu_now,
             "sbi_now": sbi_now,
             "gmo_now": gmo_now,
+            "other_brokers": fmt_other_brokers(kabu_now, rakuten_now, gmo_now),
+            "trend_combined": c_trend.get("combined", "―"),
+            "trend_nikko": c_trend.get("nikko", "―"),
+            "trend_sbi": c_trend.get("sbi", "―"),
             "total_qty": total_qty,
             "funds_man": funds_man,
             "yutai_value": yutai_val,
-            "yutai_content": str(m_row.get("yutai_content") or row.get("yutai_content") or ""),
+            "yutai_content_raw": str(m_row.get("yutai_content") or row.get("yutai_content") or ""),
+            "yutai_content": fmt_yutai_compact(str(m_row.get("yutai_content") or row.get("yutai_content") or "")),
             "yield_pct": to_float(m_row.get("yield_pct") or row.get("yield_pct")),
             "net_profit": net_profit,
             "limit_days_int": limit_days_int,
@@ -793,24 +884,28 @@ def main():
         for _, r in watch_df.sort_values(by="funds_yen").iterrows():
             c = r["code"]
             n = r["name"]
-            n_qty = fmt_qty(r["nikko_now"])
-            s_val = str(r["sbi_now"])
-            f_val = f"¥{int(r['funds_yen']):,}" if r["funds_yen"] < 99999990 else "―"
-            p_val = f"¥{int(r['net_profit']):,}" if r["net_profit"] is not None else "―"
-            y_val = str(r["yutai_content"])
+            funds_m = r["funds_man_str"]
+            n_disp = r["nikko_display"]
+            s_disp = r["sbi_display"]
+            trend_str = r["trend_combined"]
+            y_val = r["yutai_content"]
+            y_pct = f"{r['yield_pct']:.1f}%" if r["yield_pct"] is not None else "―"
+            sig = r["signal"]
 
-            sbi_color = "#f87171" if s_val in ("×", "▲") else ("#a7f3d0" if s_val == "◎" else "#94a3b8")
-            nikko_color = "#f87171" if (r["nikko_now"] is not None and r["nikko_now"] < nikko_th) else "#a7f3d0"
+            sbi_color = "#f87171" if r["sbi_now"] in ("×", "▲") or r["is_sbi_drop"] else ("#a7f3d0" if r["sbi_now"] == "◎" else "#94a3b8")
+            nikko_color = "#f87171" if r["is_nikko_drop"] or (r["nikko_now"] is not None and r["nikko_now"] < nikko_th) else "#a7f3d0"
 
             row_html = (
                 f'<div class="target-item-row">'
                 f'<div class="target-code">{c}</div>'
                 f'<div class="target-name" title="{n}">{n}</div>'
-                f'<div class="target-nikko" style="color: {nikko_color};">{n_qty}</div>'
-                f'<div class="target-sbi" style="color: {sbi_color};">{s_val}</div>'
-                f'<div class="target-funds">{f_val}</div>'
-                f'<div class="target-profit">{p_val}</div>'
+                f'<div style="text-align:right; font-weight:600; color:#fde68a;">{funds_m}</div>'
+                f'<div style="text-align:right; font-weight:600; color:{nikko_color};">{n_disp}</div>'
+                f'<div style="text-align:center; font-weight:600; color:{sbi_color};">{s_disp}</div>'
+                f'<div style="color:#94a3b8; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{trend_str}">{trend_str}</div>'
                 f'<div class="target-yutai" title="{y_val}">{y_val}</div>'
+                f'<div style="text-align:right; color:#86efac;">{y_pct}</div>'
+                f'<div style="text-align:center; font-size:11px;">{sig}</div>'
                 f'</div>'
             )
             rows_html_list.append(row_html)
@@ -826,7 +921,7 @@ def main():
             f'</div>'
             f'<div style="margin-top: 0.35rem; background: #0f172a; border-radius: 4px; padding: 0.4rem 0.6rem;">'
             f'<div class="target-item-row" style="border-bottom: 1px solid #334155; font-weight: bold; color: #94a3b8; padding-bottom: 0.2rem;">'
-            f'<div>コード</div><div>銘柄名</div><div style="text-align:right;">日興最新</div><div style="text-align:center;">SBI</div><div style="text-align:right;">取得資金</div><div style="text-align:right;">見込純益</div><div>優待内容</div>'
+            f'<div>コード</div><div>銘柄名</div><div style="text-align:right;">最低取得価格</div><div style="text-align:right;">日興最新(残量)</div><div style="text-align:center;">SBI最新</div><div>残数推移(日興/SBI)</div><div>優待内容</div><div style="text-align:right;">利回り</div><div style="text-align:center;">判定</div>'
             f'</div>'
             f'<div style="max-height: 155px; overflow-y: auto; padding-right: 4px;">'
             f'{all_rows_html}'
@@ -855,7 +950,7 @@ def main():
     with c_f4: only_nikko = st.checkbox("日興あり", value=False)
     with c_f5:
         sort_mode = st.selectbox("並び替え", options=[
-            "💴 取得資金が安い順", "💰 取得資金が高い順", "⚡ シグナル優先",
+            "💴 最低取得価格が安い順", "💰 最低取得価格が高い順", "⚡ シグナル優先",
             "🎁 実質純利益が高い順", "📈 利回りが高い順", "📉 日興在庫が多い順"
         ], label_visibility="collapsed")
     with c_f6:
@@ -882,13 +977,14 @@ def main():
         filtered_df = filtered_df[
             filtered_df["code"].astype(str).str.lower().str.contains(q) |
             filtered_df["name"].astype(str).str.lower().str.contains(q) |
-            filtered_df["yutai_content"].astype(str).str.lower().str.contains(q)
+            filtered_df["yutai_content"].astype(str).str.lower().str.contains(q) |
+            filtered_df["yutai_content_raw"].astype(str).str.lower().str.contains(q)
         ]
 
     # ソート: 監視銘柄（⭐）を常に最上部にピン留めするため watch_rank を第1キーとする
-    if "取得資金が安い順" in sort_mode:
+    if "最低取得価格が安い順" in sort_mode or "取得資金が安い順" in sort_mode:
         filtered_df = filtered_df.sort_values(by=["watch_rank", "funds_yen"], ascending=[True, True])
-    elif "取得資金が高い順" in sort_mode:
+    elif "最低取得価格が高い順" in sort_mode or "取得資金が高い順" in sort_mode:
         filtered_df = filtered_df.sort_values(by=["watch_rank", "funds_yen"], ascending=[True, False])
     elif "実質純利益が高い順" in sort_mode:
         filtered_df = filtered_df.sort_values(by=["watch_rank", "net_profit"], ascending=[True, False], na_position="last")
@@ -910,65 +1006,49 @@ def main():
     ])
 
     # ----------------------------------------------------
-    # TAB 1: 実戦ボード (st.data_editor + 確実なコードキー差分検知＆保存)
+    # TAB 1: 実戦ボード (ユーザー指定のカラム順序 ＆ ひと目でわかる残量急変表示)
     # ----------------------------------------------------
     with tab1:
         display_rows = []
         for _, r in filtered_df.iterrows():
-            diff = r["nikko_diff"]
-            diff_str = "―" if diff is None else (f"+{int(diff):,}" if diff > 0 else (f"{int(diff):,}" if diff < 0 else "±0"))
-            limit_str = f"D-{r['limit_days_int']}" if r["limit_days_int"] is not None else "―"
-
             display_rows.append({
                 "⭐": bool(r.get("watch", False)),
                 "コード": str(r.get("code", "")),
-                "銘柄名": str(r.get("name", "")),
-                "優待内容": str(r.get("yutai_content", ""))[:32] if r.get("yutai_content") else "―",
-                "優待額": float(r["yutai_value"]) if r["yutai_value"] is not None else None,
-                "取得資金": float(r["funds_yen"]) if r["funds_yen"] < 99999990 else None,
-                "意思決定": str(r.get("signal", "")),
-                "SBI急変": str(r.get("sbi_change", "―")),
-                "日興最新": fmt_qty(r.get("nikko_now")),
-                "前日比": diff_str,
-                "SBI": str(r.get("sbi_now", "―")),
-                "楽天": fmt_qty(r.get("rakuten_now")),
-                "カブ": fmt_qty(r.get("kabu_now")),
-                "GMO": str(r.get("gmo_now", "―")),
-                "純利益": float(r["net_profit"]) if r["net_profit"] is not None else None,
-                "限界日": limit_str,
-                "利回り": f"{r['yield_pct']:.1f}%" if r["yield_pct"] is not None else "―",
-                "補充": str(r.get("refill", "")),
+                "銘柄": str(r.get("name", "")),
+                "最低取得価格": str(r.get("funds_man_str", "―")),
+                "日興最新": str(r.get("nikko_display", "―")),
+                "SBI最新": str(r.get("sbi_display", "―")),
+                "残数推移": str(r.get("trend_combined", "―")),
+                "優待内容": str(r.get("yutai_content", "―")),
+                "その他証券": str(r.get("other_brokers", "―")),
+                "優待利回り": f"{r['yield_pct']:.1f}%" if r["yield_pct"] is not None else "―",
+                "判定": str(r.get("signal", "")),
             })
 
         df_table = pd.DataFrame(display_rows)
 
         if not df_table.empty:
-            df_table["コード"] = df_table["コード"].astype(str)
+            for col in df_table.columns:
+                if col != "⭐":
+                    df_table[col] = df_table[col].fillna("―").astype(str)
             edited_table = st.data_editor(
                 df_table,
                 key="yutai_data_editor",
                 use_container_width=True,
                 hide_index=True,
-                height=560,
+                height=580,
                 column_config={
                     "⭐": st.column_config.CheckboxColumn("⭐", width="small", help="監視・ピン留め（チェックで最上部に固定＆多層自動保存）"),
                     "コード": st.column_config.TextColumn("コード", width="small"),
-                    "銘柄名": st.column_config.TextColumn("銘柄名", width="medium"),
-                    "優待内容": st.column_config.TextColumn("優待内容", width="large"),
-                    "優待額": st.column_config.NumberColumn("優待額", format="¥%,d", width="small", disabled=True),
-                    "取得資金": st.column_config.NumberColumn("必要資金", format="¥%,d", width="medium", disabled=True),
-                    "意思決定": st.column_config.TextColumn("意思決定", width="small"),
-                    "SBI急変": st.column_config.TextColumn("SBI急変", width="medium"),
-                    "日興最新": st.column_config.TextColumn("日興", width="small"),
-                    "前日比": st.column_config.TextColumn("前日比", width="small"),
-                    "SBI": st.column_config.TextColumn("SBI", width="small"),
-                    "楽天": st.column_config.TextColumn("楽天", width="small"),
-                    "カブ": st.column_config.TextColumn("カブ", width="small"),
-                    "GMO": st.column_config.TextColumn("GMO", width="small"),
-                    "純利益": st.column_config.NumberColumn("純利益", format="¥%,d", width="small", disabled=True),
-                    "限界日": st.column_config.TextColumn("限界日", width="small"),
-                    "利回り": st.column_config.TextColumn("利回り", width="small"),
-                    "補充": st.column_config.TextColumn("補充", width="small"),
+                    "銘柄": st.column_config.TextColumn("銘柄", width="medium"),
+                    "最低取得価格": st.column_config.TextColumn("最低取得価格", width="small", help="優待取得に必要な概算資金（万円単位）"),
+                    "日興最新": st.column_config.TextColumn("日興最新", width="medium", help="最新在庫株数。急減時は🚨▼で減少数を強調表示"),
+                    "SBI最新": st.column_config.TextColumn("SBI最新", width="medium", help="SBI信号（◎▲×）。◎→▲等の悪化・急変時は🚨タグを表示"),
+                    "残数推移": st.column_config.TextColumn("残数推移 (日興/SBI)", width="large", help="日興およびSBIの直近数回の在庫推移"),
+                    "優待内容": st.column_config.TextColumn("優待内容", width="large", help="簡潔に要約した優待品目"),
+                    "その他証券": st.column_config.TextColumn("その他証券", width="medium", help="カブ・楽天・GMO等の残数・信号"),
+                    "優待利回り": st.column_config.TextColumn("優待利回り", width="small", help="総合利回り(%)"),
+                    "判定": st.column_config.TextColumn("判定", width="small", help="意思決定シグナル（今夜確保/要監視/待機可/枯渇）"),
                 },
                 disabled=[c for c in df_table.columns if c != "⭐"]
             )
