@@ -24,7 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import altair as alt
 import numpy as np
@@ -144,7 +144,7 @@ html, body, [class*="css"] {
 
 .target-item-row {
     display: grid;
-    grid-template-columns: 46px 120px 65px 95px 80px 185px auto 68px 68px 45px 65px;
+    grid-template-columns: 46px 115px 65px 90px 75px 170px auto 65px 65px 68px 45px 65px;
     gap: 0.35rem;
     align-items: center;
     padding: 0.2rem 0;
@@ -207,7 +207,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v11.3 (Nomura Loan Date & Total Benefit Analyzer)"
+APP_VERSION = "v11.4 (Lend Days Sync & Breakeven Wait Analyzer)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -244,6 +244,28 @@ def calc_nomura_daily_interest(loan_man: float, rate: float = DEFAULT_NOMURA_RAT
         return 0
     loan_yen = loan_man * 10000.0
     return int(round(loan_yen * rate / 365.0))
+
+def calc_breakeven_wait_days(
+    yutai_val: Optional[float],
+    funds_yen: Optional[float],
+    current_nikko_cost: int,
+    nomura_daily_cost: int = 0,
+    lend_rate: float = DEFAULT_NIKKO_LEND_RATE
+) -> Optional[int]:
+    """優待価値に対して、今クロスした場合の損益分岐待機日数（あと何日待てるか）を算出
+    - 1日あたりコスト: 日興貸株料 (funds_yen * 1.9% / 365) + 野村日歩
+    - 残余バッファ = 優待価値 - 現在の日興コスト
+    - 待機可能日数 = 残余バッファ / 1日あたりコスト
+    """
+    if yutai_val is None or yutai_val <= 0 or funds_yen is None or funds_yen <= 0 or funds_yen >= 99999990:
+        return None
+    daily_lend_fee = funds_yen * lend_rate / 365.0
+    daily_total = daily_lend_fee + max(0, nomura_daily_cost)
+    if daily_total <= 0:
+        return None
+    rem_margin = yutai_val - current_nikko_cost
+    wait_days = int(rem_margin / daily_total)
+    return wait_days
 
 # ============================================================
 # 日本の祝日（2024年〜2032年）＆ 東証権利落ち・貸株日数完全自動算出エンジン
@@ -400,8 +422,8 @@ def get_stock_rights_dates(year: int, month: int, day: int = 0) -> Tuple[dt.date
     # 権利落ち日 (翌営業日)
     drop_d = add_business_days(last_trade, 1)
 
-    # 現渡の受渡日 (権利確定日の2営業日後 ＝ 権利確定受渡)
-    close_settle = get_settlement_date(rec_d)
+    # 現渡の受渡日 (権利落ち日の2営業日後 ＝ 信用売建玉返済受渡日)
+    close_settle = get_settlement_date(drop_d)
 
     return rec_d, last_trade, drop_d, close_settle
 
@@ -427,7 +449,8 @@ def calc_stock_lend_days(
     # 新規売建受渡日 (約定日の2営業日後)
     open_settle = get_settlement_date(exec_d)
 
-    lend_days = max(1, (close_settle - open_settle).days)
+    # 日興証券公式ルール: 信用取引貸株料・金利は新規受渡日から返済受渡日までの「両端入れ」
+    lend_days = max(1, (close_settle - open_settle).days + 1)
     return lend_days, exec_d, open_settle, close_settle
 
 # ============================================================
@@ -1304,6 +1327,26 @@ def analyze_stocks(
                         limit_days_int = int(round(yutai_val / daily_cost))
                 except Exception: pass
 
+        # 損益分岐待機日数（優待価値から現行コストを引いた余力日数）
+        wait_days = None
+        wait_label = "―"
+        if funds_yen < 99999990 and funds_yen > 0 and yutai_val is not None and yutai_val > 0:
+            wait_days = calc_breakeven_wait_days(
+                yutai_val=yutai_val,
+                funds_yen=funds_yen,
+                current_nikko_cost=nikko_cost,
+                nomura_daily_cost=nomura_item_daily_interest
+            )
+            if wait_days is not None:
+                if wait_days > 30:
+                    wait_label = f"🟢余裕({wait_days}日)"
+                elif wait_days > 0:
+                    wait_label = f"🟡残{wait_days}日"
+                elif wait_days == 0:
+                    wait_label = "⚠️損益±0"
+                else:
+                    wait_label = f"🚨赤字({abs(wait_days)}日超過)"
+
         is_watch = (code in watchlist)
         c_trend = trend_map.get(str(code), {})
 
@@ -1352,6 +1395,8 @@ def analyze_stocks(
             "net_profit_nikko": net_profit_nikko,
             "net_profit_nikko_str": net_profit_nikko_str,
             "nomura_item_daily_interest": nomura_item_daily_interest,
+            "wait_days": wait_days,
+            "wait_label": wait_label,
             "yield_pct": to_float(m_row.get("yield_pct") or row.get("yield_pct")),
             "net_profit": net_profit,
             "limit_days_int": limit_days_int,
@@ -1519,11 +1564,13 @@ def main():
         with col_btn1:
             if st.button("📥 再読込", use_container_width=True):
                 st.session_state["watchlist"] = load_watchlist_from_disk()
+                st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
                 st.toast("監視リストを再読込しました")
                 st.rerun()
         with col_btn2:
             if st.button("🔄 6銘柄リセット", use_container_width=True):
                 st.session_state["watchlist"] = DEFAULT_WATCHLIST.copy()
+                st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
                 persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo)
                 st.toast("指定6銘柄に初期化リセットしました")
                 st.rerun()
@@ -1565,6 +1612,7 @@ def main():
                 c_clean = fmt_code(new_code_in.strip())
                 if c_clean and c_clean not in st.session_state["watchlist"]:
                     st.session_state["watchlist"].append(c_clean)
+                    st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
                     persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo, trigger_code=c_clean)
                     st.toast(f"✅ {c_clean} を監視リストに追加しました")
                     st.rerun()
@@ -1585,6 +1633,7 @@ def main():
                     with c_row2:
                         if st.button("❌", key=f"del_w_{wc}", help=f"{wc} を監視から解除"):
                             st.session_state["watchlist"].remove(wc)
+                            st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
                             persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo, trigger_code=wc)
                             st.toast(f"🗑️ {wc} を解除しました")
                             st.rerun()
@@ -1679,6 +1728,7 @@ def main():
                 f'<div class="target-yutai" title="{y_val}">{y_val}</div>'
                 f'<div style="text-align:right; font-weight:600; color:#cbd5e1;">{n_cost_str}</div>'
                 f'<div style="text-align:right; font-weight:600; color:#86efac;">{n_net_str}</div>'
+                f'<div style="text-align:center; font-size:11px; color:#fde68a;">{r.get("wait_label", "―")}</div>'
                 f'<div style="text-align:right; color:#86efac;">{y_pct}</div>'
                 f'<div style="text-align:center; font-size:11px;">{sig}</div>'
                 f'</div>'
@@ -1739,7 +1789,7 @@ def main():
             f'</div>'
             f'<div style="margin-top: 0.35rem; background: #0f172a; border-radius: 4px; padding: 0.4rem 0.6rem;">'
             f'<div class="target-item-row" style="border-bottom: 1px solid #334155; font-weight: bold; color: #94a3b8; padding-bottom: 0.2rem;">'
-            f'<div>コード</div><div>銘柄名</div><div style="text-align:right;">最低取得価格</div><div style="text-align:right;">日興最新</div><div style="text-align:center;">SBI最新</div><div>残数推移</div><div>優待内容</div><div style="text-align:right;">日興手数料</div><div style="text-align:right;">実質手取</div><div style="text-align:right;">利回り</div><div style="text-align:center;">判定</div>'
+            f'<div>コード</div><div>銘柄名</div><div style="text-align:right;">最低取得価格</div><div style="text-align:right;">日興最新</div><div style="text-align:center;">SBI最新</div><div>残数推移</div><div>優待内容</div><div style="text-align:right;">日興手数料</div><div style="text-align:right;">実質手取</div><div style="text-align:center;">損益分岐</div><div style="text-align:right;">利回り</div><div style="text-align:center;">判定</div>'
             f'</div>'
             f'<div style="max-height: 155px; overflow-y: auto; padding-right: 4px;">'
             f'{all_rows_html}'
@@ -1756,6 +1806,29 @@ def main():
             f'</div>'
         )
         st.markdown(empty_panel, unsafe_allow_html=True)
+
+    # ----------------------------------------------------
+    # ★ 直近在庫急減・シグナル悪化銘柄の速報アラートバナー
+    # ----------------------------------------------------
+    alert_stocks = df_analyzed[(df_analyzed["is_nikko_drop"] == True) | (df_analyzed["is_sbi_drop"] == True) | (df_analyzed["signal"] == "🔴 今夜確保")].copy()
+    if not alert_stocks.empty:
+        alert_chips = []
+        for _, ar in alert_stocks.head(6).iterrows():
+            c = ar["code"]
+            n = ar["name"]
+            drop_tag = ar["nikko_display"] if ar["is_nikko_drop"] else ar["sbi_display"]
+            alert_chips.append(
+                f'<span style="background:rgba(239,68,68,0.18); border:1px solid rgba(239,68,68,0.45); border-radius:4px; padding:2px 7px; font-size:11px; margin-right:4px; display:inline-block;">'
+                f'<b style="color:#fecaca;">[{c}] {n}</b>: <span style="color:#f87171;font-weight:600;">{drop_tag}</span> ({ar["signal"]})'
+                f'</span>'
+            )
+        alert_banner_html = (
+            f'<div style="background:#1e1b4b; border:1px solid #6366f1; border-radius:6px; padding:0.35rem 0.65rem; margin-top:0.4rem; margin-bottom:0.2rem; display:flex; align-items:center; flex-wrap:wrap; gap:4px;">'
+            f'<span style="font-weight:700; color:#c7d2fe; font-size:11.5px; margin-right:6px;">🚨 在庫急変・シグナル悪化速報:</span>'
+            f'{" ".join(alert_chips)}'
+            f'</div>'
+        )
+        st.markdown(alert_banner_html, unsafe_allow_html=True)
 
     # ----------------------------------------------------
     # コントロールバー
@@ -1872,6 +1945,7 @@ def main():
                 "優待内容": str(r.get("yutai_content", "―")),
                 "日興手数料": n_cost_display,
                 "実質手取": str(r.get("net_profit_nikko_str", "―")),
+                "損益分岐": str(r.get("wait_label", "―")),
                 "その他証券": str(r.get("other_brokers", "―")),
                 "優待利回り": f"{r['yield_pct']:.1f}%" if r["yield_pct"] is not None else "―",
                 "判定": str(r.get("signal", "")),
@@ -1911,6 +1985,7 @@ def main():
                     "優待内容": st.column_config.TextColumn("優待内容", width="large", help="優待品目・金額・数量"),
                     "日興手数料": st.column_config.TextColumn("日興手数料", width="small", help=nikko_col_help),
                     "実質手取": st.column_config.TextColumn("実質手取", width="small", help="優待価値(円)から日興優待クロスコストを差し引いた実質純利益"),
+                    "損益分岐": st.column_config.TextColumn("損益分岐 (待機可)", width="small", help="日興貸株料＋野村利息が優待価値を超えて赤字転落するまでの限界待機日数"),
                     "その他証券": st.column_config.TextColumn("その他証券", width="small", help="カブ・楽天・GMO等の残数・信号"),
                     "優待利回り": st.column_config.TextColumn("優待利回り", width="small", help="総合利回り(%)"),
                     "判定": st.column_config.TextColumn("判定", width="small", help="意思決定シグナル（今夜確保/要監視/待機可/枯渇）"),
@@ -2091,7 +2166,13 @@ def main():
                 
                 # 時系列順序のソート順リスト（左から右への時系列順を絶対保証）
                 sorted_timeline = sub.sort_values(by="dt")["display_time"].unique().tolist()
-                
+
+                # ★銘柄名の完全補完 (df_analyzed から確実に補完し、name 欠落時の折れ線結合を完全防止)
+                code_to_name = dict(zip(df_analyzed["code"].astype(str), df_analyzed["name"].astype(str)))
+                sub["code_str"] = sub["code"].astype(str)
+                sub["name"] = sub["code_str"].map(code_to_name).fillna(sub.get("name", "")).fillna(sub["code_str"])
+                sub["stock_label"] = "[" + sub["code_str"] + "] " + sub["name"]
+
                 chart = alt.Chart(sub).mark_line(point=True).encode(
                     x=alt.X(
                         "display_time:O",
@@ -2100,10 +2181,11 @@ def main():
                         axis=alt.Axis(labelAngle=-40)
                     ),
                     y=alt.Y("nikko:Q", title="日興在庫数 (株)"),
-                    color=alt.Color("name:N", title="銘柄名"),
+                    color=alt.Color("stock_label:N", title="銘柄"),
+                    detail="code_str:N",
                     tooltip=[
-                        alt.Tooltip("name:N", title="銘柄名"),
-                        alt.Tooltip("code:N", title="コード"),
+                        alt.Tooltip("stock_label:N", title="銘柄"),
+                        alt.Tooltip("code_str:N", title="コード"),
                         alt.Tooltip("timestamp:N", title="取得日時"),
                         alt.Tooltip("nikko:Q", title="日興在庫(株)", format=","),
                         alt.Tooltip("sbi:N", title="SBI"),
