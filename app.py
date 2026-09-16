@@ -205,7 +205,7 @@ DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 DEFAULT_SPREADSHEET_ID = "175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM"
 DEFAULT_GAS_API_URL = "https://script.google.com/macros/s/AKfycbwKopml2DIZcM_92GhuyP9R06MzqtyaYCda8STyWSiPz46vnfZfpnmyoUy8W5bI681FAQ/exec"
-APP_VERSION = "v10.3 (Enhanced Yutai Details & Visual Smart Trends)"
+APP_VERSION = "v10.4 (Infinite Addition Bug Fixed & Dynamic Key Sync)"
 
 # ============================================================
 # 3. 堅牢なフォーマッター
@@ -1194,7 +1194,7 @@ def main():
     # ----------------------------------------------------
     # コントロールバー
     # ----------------------------------------------------
-    c_f1, c_f2, c_f3, c_f4, c_f5, c_f6, c_f7 = st.columns([2.0, 1.4, 0.9, 0.9, 1.6, 1.1, 1.5])
+    c_f1, c_f2, c_f3, c_f4, c_f5, c_f6, c_f7, c_f8 = st.columns([1.8, 1.2, 0.8, 0.8, 1.4, 1.1, 1.0, 1.3])
     with c_f1: query = st.text_input("検索", placeholder="コード/銘柄名/優待内容", label_visibility="collapsed")
     with c_f2: signal_filter = st.multiselect("絞込", options=["🔴 今夜確保", "🔥 補充", "🚨 SBI急変", "🔴 即確保", "🟡 要監視", "🟢 待機可", "⚪ 枯渇"], default=[], label_visibility="collapsed")
     with c_f3: only_watch = st.checkbox("⭐ 監視のみ", value=False)
@@ -1205,9 +1205,16 @@ def main():
             "🎁 実質純利益が高い順", "📈 利回りが高い順", "📉 日興在庫が多い順"
         ], label_visibility="collapsed")
     with c_f6:
-        if st.button("🔄 画面再読込", use_container_width=True):
+        if st.button("🔄 6銘柄初期化", use_container_width=True, help="監視リストをご指定の初期6銘柄にリセットします"):
+            st.session_state["watchlist"] = DEFAULT_WATCHLIST.copy()
+            st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
+            persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo)
+            st.toast("指定6銘柄にリセットしました")
             st.rerun()
     with c_f7:
+        if st.button("🔄 再読込", use_container_width=True):
+            st.rerun()
+    with c_f8:
         if st.button("🚀 最新取得", use_container_width=True):
             with st.spinner("⚡ 最新在庫データを直接スクレイピング中 (数秒)..."):
                 ok, msg = run_direct_scrape()
@@ -1302,9 +1309,14 @@ def main():
             for col in df_table.columns:
                 if col != "⭐":
                     df_table[col] = df_table[col].fillna("―").astype(str)
+            # ★連鎖ループ防止: エディタキーを動的バージョン化し、編集時にキーを切り替えて古い行インデックスのキャッシュを完全破棄
+            if "editor_version" not in st.session_state:
+                st.session_state["editor_version"] = 0
+            editor_key = f"yutai_data_editor_{st.session_state['editor_version']}"
+
             edited_table = st.data_editor(
                 df_table,
-                key="yutai_data_editor",
+                key=editor_key,
                 use_container_width=True,
                 hide_index=True,
                 height=580,
@@ -1324,15 +1336,31 @@ def main():
                 disabled=[c for c in df_table.columns if c != "⭐"]
             )
 
-            # --- 確実なコードキー差分検知 (インデックスずれ・ソート順に完全非依存) ---
-            orig_map = dict(zip(df_table["コード"], df_table["⭐"]))
-            new_map = dict(zip(edited_table["コード"], edited_table["⭐"]))
+            # --- 確実なコードキー差分検知 (Streamlit の内部 edited_rows を直接解析) ---
+            editor_state = st.session_state.get(editor_key, {})
+            edited_rows = editor_state.get("edited_rows", {}) if isinstance(editor_state, dict) else {}
 
             changed_items = []
-            for c, new_val in new_map.items():
-                old_val = orig_map.get(c)
-                if old_val is not None and old_val != new_val:
-                    changed_items.append((c, new_val))
+            if edited_rows:
+                # ユーザーが実際にクリック・編集した行のみをピンポイントで取得（他の行の誤検知ゼロ）
+                for row_idx_str, changes in edited_rows.items():
+                    if "⭐" in changes:
+                        try:
+                            idx = int(row_idx_str)
+                            if 0 <= idx < len(df_table):
+                                c = str(df_table.iloc[idx]["コード"])
+                                new_val = bool(changes["⭐"])
+                                changed_items.append((c, new_val))
+                        except (ValueError, IndexError):
+                            pass
+            else:
+                # フォールバック: 全体マップ比較（念のため）
+                orig_map = dict(zip(df_table["コード"], df_table["⭐"]))
+                new_map = dict(zip(edited_table["コード"], edited_table["⭐"]))
+                for c, new_val in new_map.items():
+                    old_val = orig_map.get(c)
+                    if old_val is not None and old_val != new_val:
+                        changed_items.append((c, new_val))
 
             if changed_items:
                 for c, is_watched in changed_items:
@@ -1343,7 +1371,9 @@ def main():
                     # 多層保存（ローカル + GitHub API + GAS）
                     persist_watchlist(st.session_state["watchlist"], gas_api_url, gh_token, gh_repo, trigger_code=c)
 
-                # 即時再描画（これで上部パネル・ピン留め・ステータスバーが100%確実に即時変化する！）
+                # ★最重要: エディタキーのバージョンを上げて前回の編集キャッシュ（行番号）を完全破棄！
+                st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
+                # 即時再描画（これで連鎖ループは100%完全に防がれる！）
                 st.rerun()
 
     # ----------------------------------------------------
