@@ -266,19 +266,28 @@ def fmt_signal(v: Any) -> str:
     if s in ("0", "0.0", "×", "✕"): return "×"
     return s
 
+def safe_get_secret(key: str, default: str = "") -> str:
+    """Streamlit Secrets が未設定の環境でも例外を投げずに安全に値を取得"""
+    try:
+        if hasattr(st, "secrets") and key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
 def get_github_token() -> str:
     """Streamlit Secrets, 環境変数, ローカルファイルから安全にGitHubトークンを取得"""
-    t = st.secrets.get("GITHUB_TOKEN", "")
-    if t: return t
-    t = os.environ.get("GITHUB_TOKEN", "")
+    t = safe_get_secret("GITHUB_TOKEN", "")
     if t: return t
     for p in [
         BASE_DIR / ".github_token",
         Path("C:/Users/tekka/Desktop/antigravity/mitsubishi_hems/.github_token")
     ]:
         if p.exists() and p.is_file():
-            val = p.read_text(encoding="utf-8").strip()
-            if val: return val
+            try:
+                val = p.read_text(encoding="utf-8").strip()
+                if val: return val
+            except Exception: pass
     return ""
 
 # ============================================================
@@ -699,7 +708,7 @@ def analyze_stocks(
 # ============================================================
 def main():
     gh_token = get_github_token()
-    gh_repo = st.secrets.get("GITHUB_REPO", os.environ.get("GITHUB_REPO", "tekkame/yutai-cross-dashboard"))
+    gh_repo = safe_get_secret("GITHUB_REPO", "tekkame/yutai-cross-dashboard")
 
     with st.sidebar:
         st.markdown("### ⚙️ 設定 ＆ 監視リスト管理")
@@ -918,6 +927,7 @@ def main():
         df_table = pd.DataFrame(display_rows)
 
         if not df_table.empty:
+            df_table["コード"] = df_table["コード"].astype(str)
             edited_table = st.data_editor(
                 df_table,
                 key="yutai_data_editor",
@@ -1047,6 +1057,8 @@ def main():
                     mx_rows.append(row)
 
                 df_mx = pd.DataFrame(mx_rows)
+                if not df_mx.empty and "コード" in df_mx.columns:
+                    df_mx["コード"] = df_mx["コード"].astype(str)
                 mx_config = {
                     "コード": st.column_config.TextColumn("コード", width="small"),
                     "銘柄名": st.column_config.TextColumn("銘柄名", width="medium"),
