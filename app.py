@@ -225,7 +225,7 @@ SETTINGS_FILE = DATA_DIR / "user_settings.json"
 DEFAULT_SPREADSHEET_ID = safe_get_secret("SPREADSHEET_ID", "")
 DEFAULT_GAS_API_URL = safe_get_secret("GAS_API_URL", "")
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v11.9 (Private Secret Auth & Standalone)"
+APP_VERSION = "v11.10 (Resilient Watchlist & Sanitized Table & While Guard)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -488,18 +488,13 @@ def calc_stock_lend_days(
 
     req_year, month, day = parse_rights_month(rights_val)
 
-    if req_year is not None:
-        year = req_year
+    year = req_year if req_year is not None else exec_d.year
+    rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
+    # 過去データ混入安全ガード: 約定日が権利付最終売買日を過ぎている場合は未来の該当年月まで年を進める
+    max_year = exec_d.year + 5
+    while exec_d > last_trade and year < max_year:
+        year += 1
         rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
-        if exec_d > last_trade:
-            year += 1
-            rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
-    else:
-        year = exec_d.year
-        rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
-        if exec_d > last_trade:
-            year += 1
-            rec_d, last_trade, drop_d, close_settle = get_stock_rights_dates(year, month, day)
 
     # 新規売建受渡日 (約定日の2営業日後)
     open_settle = get_settlement_date(exec_d)
@@ -899,6 +894,16 @@ def fetch_watchlist_from_github(token: str, repo: str) -> Optional[List[str]]:
     except Exception:
         pass
     return None
+
+def reload_watchlist_fresh() -> List[str]:
+    """GitHub API から直接最新の watchlist.json を強制取得し、ローカルディスク＆セッションへ同期（リスト消失を完全防止）"""
+    gh_token = get_github_token()
+    gh_repo = safe_get_secret("GITHUB_REPO", "tekkame/yutai-cross-dashboard")
+    remote_codes = fetch_watchlist_from_github(gh_token, gh_repo)
+    if remote_codes is not None and len(remote_codes) > 0:
+        save_watchlist_to_disk(remote_codes)
+        return remote_codes
+    return load_watchlist_from_disk()
 
 def load_initial_watchlist(df_mast: Optional[pd.DataFrame] = None) -> List[str]:
     """監視リストを多層フェイルオーバーで堅牢にロード（Streamlit Cloud再起動時の初期化を完全防止）
@@ -1697,9 +1702,9 @@ def main():
             st.info("ℹ️ ローカル保存モード")
 
         if st.button("📥 監視リスト再読込", use_container_width=True):
-            st.session_state["watchlist"] = load_watchlist_from_disk()
+            st.session_state["watchlist"] = reload_watchlist_fresh()
             st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
-            st.toast("監視リストを再読込しました")
+            st.toast("監視リストをGitHub＆ローカルから最新再読込しました")
             st.rerun()
 
         st.caption(f"App Version: {APP_VERSION}")
@@ -1848,15 +1853,20 @@ def main():
             trend_plain = r.get("trend_combined", "―")
             trend_html_val = r.get("trend_html") or trend_plain
 
+            c_esc = html.escape(str(c))
+            n_esc = html.escape(str(n))
+            y_esc = html.escape(str(y_val))
+            trend_plain_esc = html.escape(str(trend_plain))
+
             row_html = (
                 f'<tr style="border-bottom: 1px dashed #1e293b;">'
-                f'<td style="padding: 4px 6px; font-family:\'JetBrains Mono\',monospace; color:#93c5fd; font-weight:600;">{c}</td>'
-                f'<td style="padding: 4px 6px; color:#f1f5f9; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{n}">{n}</td>'
+                f'<td style="padding: 4px 6px; font-family:\'JetBrains Mono\',monospace; color:#93c5fd; font-weight:600;">{c_esc}</td>'
+                f'<td style="padding: 4px 6px; color:#f1f5f9; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{n_esc}">{n_esc}</td>'
                 f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#fde68a;">{funds_m}</td>'
                 f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:{nikko_color};">{n_disp}</td>'
                 f'<td style="padding: 4px 6px; text-align:center; font-weight:600; color:{sbi_color};">{s_disp}</td>'
-                f'<td style="padding: 4px 6px; font-size:11px; white-space:nowrap;" title="{trend_plain}">{trend_html_val}</td>'
-                f'<td style="padding: 4px 6px; color:#cbd5e1; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{y_val}">{y_val}</td>'
+                f'<td style="padding: 4px 6px; font-size:11px; white-space:nowrap;" title="{trend_plain_esc}">{trend_html_val}</td>'
+                f'<td style="padding: 4px 6px; color:#cbd5e1; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="{y_esc}">{y_esc}</td>'
                 f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#cbd5e1;">{n_cost_str}</td>'
                 f'<td style="padding: 4px 6px; text-align:center; font-size:10.5px; font-weight:600; color:#38bdf8; background:rgba(56,189,248,0.08); border-radius:4px;" title="1日待機/2日待機で削減される日興貸株料">{r.get("saving_str", "―")}</td>'
                 f'<td style="padding: 4px 6px; text-align:right; font-weight:600; color:#86efac;">{n_net_str}</td>'
