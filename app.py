@@ -222,8 +222,9 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
+STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v12.0 (Multi-Month Dashboard & Safe Rotation Scraper)"
+APP_VERSION = "v12.4 (Default Min Funds Sort & Auto Price Share Estimator)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -585,6 +586,61 @@ def fmt_funds_man(funds_yen: Any) -> str:
     if man >= 100:
         return f"{int(round(man))}万"
     return f"{man:.1f}万"
+
+# ============================================================
+# 株価キャッシュ & 自動補完エンジン
+# ============================================================
+_STOCK_PRICES_CACHE: Dict[str, float] = {}
+
+def get_stock_price(code: str) -> Optional[float]:
+    """キャッシュおよび必要に応じて株探から株価を取得（メモリ＋ファイルキャッシュ）"""
+    global _STOCK_PRICES_CACHE
+    c_norm = str(code).strip().zfill(4)
+    if not _STOCK_PRICES_CACHE and STOCK_PRICES_CACHE_FILE.exists():
+        try:
+            _STOCK_PRICES_CACHE = json.loads(STOCK_PRICES_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            _STOCK_PRICES_CACHE = {}
+    if c_norm in _STOCK_PRICES_CACHE and _STOCK_PRICES_CACHE[c_norm] > 0:
+        return _STOCK_PRICES_CACHE[c_norm]
+
+    # キャッシュになければ株探から1回だけフェッチ
+    url = f"https://kabutan.jp/stock/?code={c_norm}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            html_text = resp.read().decode("utf-8", errors="ignore")
+            m = re.search(r'<span class="kabuka">([0-9,.]+)円</span>', html_text)
+            if m:
+                val = float(m.group(1).replace(",", ""))
+                _STOCK_PRICES_CACHE[c_norm] = val
+                try:
+                    STOCK_PRICES_CACHE_FILE.write_text(json.dumps(_STOCK_PRICES_CACHE, ensure_ascii=False, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
+                return val
+    except Exception:
+        pass
+    return None
+
+def extract_shares(row: Any, m_row: Any, yutai_content: str) -> int:
+    """データ行または優待内容テキストから必要株数を抽出（デフォルト100株）"""
+    for obj in [row, m_row]:
+        if obj is not None:
+            s = obj.get("shares") or obj.get("株数")
+            if s is not None:
+                try:
+                    v = int(float(s))
+                    if v > 0: return v
+                except Exception:
+                    pass
+    if isinstance(yutai_content, str):
+        m = re.search(r'【(\d+)株】', yutai_content)
+        if m:
+            try: return int(m.group(1))
+            except Exception: pass
+    return 100
 
 # 主要・人気優待銘柄の正確かつ具体的な優待品名・金額マスタ（補完用）
 KNOWN_YUTAI = {
@@ -1257,6 +1313,7 @@ def normalize_history(df: pd.DataFrame) -> pd.DataFrame:
         "GMO在庫": "gmo", "GMO信号": "gmo", "GMO": "gmo", "gmo": "gmo",
         "松井信号": "matsui", "松井": "matsui", "マネ信号": "monex", "マネックス": "monex",
         "株価": "stock_price", "参考株価(円)": "stock_price", "前日終値": "stock_price",
+        "株数": "shares", "株式数": "shares",
         "必要資金": "funds_man", "必要資金(万)": "funds_man", "資金万円": "funds_man", "資金(万)": "funds_man",
         "優待価値": "yutai_value", "優待価値(円)": "yutai_value",
         "優待内容": "yutai_content", "優待": "yutai_content",
@@ -1292,6 +1349,8 @@ def normalize_master(df: pd.DataFrame) -> pd.DataFrame:
     col_map = {
         "コード": "code", "銘柄名": "name", "優待内容": "yutai_content",
         "優待価値": "yutai_value", "優待価値(円)": "yutai_value",
+        "株価": "stock_price", "参考株価(円)": "stock_price", "前日終値": "stock_price",
+        "株数": "shares", "株式数": "shares",
         "必要資金": "funds_man", "必要資金(万)": "funds_man", "資金万円": "funds_man",
         "利回り(%)": "yield_pct", "総合利回り": "yield_pct", "売建上限": "gmo_limit",
         "権利年月": "rights_month", "権利確定月": "rights_month", "権利月": "rights_month"
@@ -1468,15 +1527,27 @@ def analyze_stocks(
 
         yutai_val = to_float(m_row.get("yutai_value") or row.get("yutai_value"))
         funds_man = to_float(m_row.get("funds_man") or row.get("funds_man"))
+        stock_price = to_float(row.get("stock_price") or m_row.get("stock_price"))
+        y_content_str = str(m_row.get("yutai_content") or row.get("yutai_content") or "")
+        req_shares = extract_shares(row, m_row, y_content_str)
+
+        # 株価がない、または0の場合はキャッシュ/株探から自動補完
+        if (stock_price is None or stock_price <= 0) and code:
+            stock_price = get_stock_price(code)
+
+        # 最低取得価格（funds_man）が空または0の場合、株価×必要株数で自動算出補完
+        if (funds_man is None or funds_man <= 0):
+            if stock_price is not None and stock_price > 0 and req_shares > 0:
+                funds_man = round(stock_price * req_shares / 10000.0, 2)
+
         funds_yen = int(round(funds_man * 10000)) if (funds_man is not None and funds_man > 0) else 99999999
+
+        if (stock_price is None or stock_price <= 0) and funds_man is not None and req_shares > 0:
+            stock_price = round(funds_man * 10000.0 / req_shares)
 
         days_left_raw = str(row.get("days_left") or "10").replace("D-", "")
         try: d_n = int(days_left_raw)
         except ValueError: d_n = 10
-
-        stock_price = to_float(row.get("stock_price") or m_row.get("stock_price"))
-        if stock_price is None and funds_man is not None:
-            stock_price = round(funds_man * 10000 / 100.0)
 
         # 権利月と想定貸株日数の算出 (自動モード時は東証祝日カレンダー・現在日時から完全自動算出)
         rights_val = row.get("rights_month") or m_row.get("rights_month") or default_rights_month
@@ -1602,7 +1673,10 @@ def analyze_stocks(
             "nomura_item_daily_interest": nomura_item_daily_interest,
             "wait_days": wait_days,
             "wait_label": wait_label,
-            "yield_pct": to_float(m_row.get("yield_pct") or row.get("yield_pct")),
+            "yield_pct": (
+                to_float(m_row.get("yield_pct") or row.get("yield_pct")) or 
+                (round((yutai_val / (funds_man * 10000.0)) * 100, 2) if (yutai_val and funds_man and funds_man > 0) else None)
+            ),
             "net_profit": net_profit,
             "limit_days_int": limit_days_int,
             "days_left": d_n,
@@ -2240,10 +2314,14 @@ def main():
     with c_f4: only_nikko = st.checkbox("日興あり", value=False)
     with c_f5:
         sort_mode = st.selectbox("並び替え", options=[
-            "🔄 ソートなし (標準)",
-            "💴 最低取得価格が安い順", "💰 最低取得価格が高い順", "⚡ シグナル優先",
-            "🎁 実質純利益が高い順", "📈 利回りが高い順", "📉 日興在庫が多い順"
-        ], label_visibility="collapsed")
+            "💴 最低取得価格が安い順",
+            "💰 最低取得価格が高い順",
+            "⚡ シグナル優先",
+            "🎁 実質純利益が高い順",
+            "📈 利回りが高い順",
+            "📉 日興在庫が多い順",
+            "🔄 ソートなし (標準)"
+        ], index=0, label_visibility="collapsed")
     with c_f6:
         if st.button("🔄 再読込", use_container_width=True):
             st.rerun()
@@ -2291,15 +2369,15 @@ def main():
             filtered_df["yutai_content_raw"].astype(str).str.lower().str.contains(q)
         ]
 
-    # ソート: ユーザーが明示的に指定した場合のみ並び替え
+    # ソート: デフォルトは「💴 最低取得価格が安い順」
     # ★重要改善: チェックボックス操作時に行が勝手に最上部に飛んで連続チェックできなくなる不具合を根絶するため、
     # watch_rank による強制並び替えは完全撤廃（監視銘柄は上部ピン留めカードで常時確認可能）。
-    if sort_mode == "🔄 ソートなし (標準)":
-        pass  # 元の順序（スクレイピング/マスター順）を完全維持
-    elif "最低取得価格が安い順" in sort_mode or "取得資金が安い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["funds_yen"], ascending=[True])
+    if "最低取得価格が安い順" in sort_mode or "取得資金が安い順" in sort_mode:
+        filtered_df = filtered_df.sort_values(by=["funds_yen"], ascending=[True], na_position="last")
     elif "最低取得価格が高い順" in sort_mode or "取得資金が高い順" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["funds_yen"], ascending=[False])
+        valid_funds = filtered_df[filtered_df["funds_yen"] < 99999990].sort_values(by=["funds_yen"], ascending=[False])
+        invalid_funds = filtered_df[filtered_df["funds_yen"] >= 99999990]
+        filtered_df = pd.concat([valid_funds, invalid_funds])
     elif "実質純利益が高い順" in sort_mode:
         filtered_df = filtered_df.sort_values(by=["net_profit"], ascending=[False], na_position="last")
     elif "利回りが高い順" in sort_mode:
@@ -2307,7 +2385,9 @@ def main():
     elif "日興在庫が多い順" in sort_mode:
         filtered_df = filtered_df.sort_values(by=["nikko_now"], ascending=[False], na_position="last")
     elif "シグナル優先" in sort_mode:
-        filtered_df = filtered_df.sort_values(by=["signal_rank", "funds_yen"], ascending=[True, True])
+        filtered_df = filtered_df.sort_values(by=["signal_rank", "funds_yen"], ascending=[True, True], na_position="last")
+    elif sort_mode == "🔄 ソートなし (標準)":
+        pass  # 元の順序（スクレイピング/マスター順）を完全維持
 
     # ----------------------------------------------------
     # 検索・絞込・ソート変更時の data_editor インデックスズレ防止

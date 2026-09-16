@@ -15,6 +15,8 @@ core/merger.py - データマージエンジン (ルーティン最優先マー�
 from __future__ import annotations
 
 import datetime as dt
+import json
+from pathlib import Path
 import re
 from typing import Any
 
@@ -143,7 +145,23 @@ def build_rows(
 
         # 株価・株数
         kabuka = g.get("stock_price") or g.get("kabuka")
-        kabusu = g.get("kabusu") or 100.0
+        kabusu = g.get("kabusu")
+        if kabusu is None or kabusu <= 0:
+            m_sh = re.search(r"【(\d+)株】", content)
+            kabusu = float(m_sh.group(1)) if m_sh else 100.0
+
+        # 株価が空の場合、stock_prices_cache.json から引き当て
+        if kabuka is None or kabuka <= 0:
+            cache_p = Path("data/stock_prices_cache.json")
+            if cache_p.exists():
+                try:
+                    c_dict = json.loads(cache_p.read_text(encoding="utf-8"))
+                    c_norm = str(code).strip().zfill(4)
+                    if c_norm in c_dict and c_dict[c_norm] > 0:
+                        kabuka = float(c_dict[c_norm])
+                except Exception:
+                    pass
+
         if funds_man is None and kabuka and kabuka > 0:
             funds_man = round(kabuka * kabusu / 10000, 2)
         elif kabuka is None and funds_man and funds_man > 0:
