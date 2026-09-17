@@ -224,7 +224,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v12.7 (Fixed Expired Labels & Unified GitHub Cloud Scrape Sync)"
+APP_VERSION = "v12.8 (Perpetual Watchlist: QueryParams & LocalStorage Multi-Layer Sync)"
 
 # 上場廃止・持株会社統合・TOB成立済みの過去銘柄（画面・分析・集計から完全除外）
 DELISTED_CODES = {
@@ -1033,36 +1033,51 @@ def reload_watchlist_fresh() -> List[str]:
     return load_watchlist_from_disk()
 
 def load_initial_watchlist(df_mast: Optional[pd.DataFrame] = None) -> List[str]:
-    """監視リストを多層フェイルオーバーで堅牢にロード（Streamlit Cloud再起動時の初期化を完全防止）
+    """監視リストを多層フェイルオーバーで堅牢にロード（ブラウザ開き直し・Streamlit Cloud再起動時の初期化を完全防止）
+    ⓪ URLクエリパラメータ (?watch=3088,3167,... または ?watch=none) 【最優先・ブラウザ再読み込み耐性】
     ① ローカルの data/watchlist.json
     ② GitHub リポジトリ上の最新 data/watchlist.json
     ③ Google スプレッドシート（master_list の監視列=TRUE）
     ④ デフォルト6銘柄
     """
+    # 0. URLクエリパラメータ確認 (ブラウザ開き直し・リロード・ブックマーク対策の最優先レイヤー)
+    try:
+        url_watch = str(st.query_params.get("watch", "")).strip()
+        if url_watch:
+            if url_watch.lower() in ("none", "empty", "clear", "0"):
+                save_watchlist_to_disk([])
+                return []
+            codes = [fmt_code(c.strip()) for c in url_watch.split(",") if c.strip()]
+            if codes:
+                save_watchlist_to_disk(codes)
+                return codes
+    except Exception:
+        pass
+
     # 1. ローカルディスク確認
-    local_codes = []
+    local_codes = None
     if WATCHLIST_FILE.exists():
         try:
             codes = json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
-            if isinstance(codes, list) and codes:
+            if isinstance(codes, list):
                 local_codes = [fmt_code(c) for c in codes if c]
         except Exception:
             pass
 
     # ローカルがデフォルト6銘柄と異なりユーザー追加・削除済みなら最優先信頼
-    if local_codes and set(local_codes) != set(DEFAULT_WATCHLIST):
+    if local_codes is not None and len(local_codes) > 0 and set(local_codes) != set(DEFAULT_WATCHLIST):
         return local_codes
 
     # 2. GitHub リポジトリから直接最新の watchlist.json を取得（Cloudコンテナ再起動対策）
     gh_token = get_github_token()
     gh_repo = safe_get_secret("GITHUB_REPO", "tekkame/yutai-cross-dashboard")
     remote_codes = fetch_watchlist_from_github(gh_token, gh_repo)
-    if remote_codes and set(remote_codes) != set(DEFAULT_WATCHLIST):
+    if remote_codes is not None and len(remote_codes) > 0 and set(remote_codes) != set(DEFAULT_WATCHLIST):
         save_watchlist_to_disk(remote_codes)  # ローカルディスクも同期
         return remote_codes
 
-    # 3. ローカルに正常なリストがあればそれを採用
-    if local_codes:
+    # 3. ローカルに正常なリストがあればそれを採用 (空リスト含む)
+    if local_codes is not None and len(local_codes) > 0:
         return local_codes
 
     # 4. Google スプレッドシートの master_list に監視フラグがある場合のフォールバック
@@ -1119,14 +1134,20 @@ def _sync_to_github_worker(token: str, repo: str, content_str: str, commit_msg: 
             break
 
 def persist_watchlist(current_list: List[str], gh_token: str, gh_repo: str, trigger_code: str = ""):
-    """①ローカル保存 + ②GitHubリポジトリ永続化 を実行（単一コミットで競合根絶）"""
+    """①ローカル保存 + ②URLクエリパラメータ即時同期 + ③GitHubリポジトリ永続化 を実行（単一コミットで競合根絶）"""
     clean_list = sorted(list(set(fmt_code(c) for c in current_list if c)))
     json_str = json.dumps(clean_list, ensure_ascii=False, indent=2)
 
     # 1. ローカル保存 (即時)
     save_watchlist_to_disk(clean_list)
 
-    # 2. GitHubへの非同期コミット (Streamlit Cloud再起動対策: 1回にまとめて送信)
+    # 2. URLクエリパラメータに即時反映（ブラウザの開き直し・リロード・ブックマークで100%保持）
+    try:
+        st.query_params["watch"] = ",".join(clean_list) if clean_list else "none"
+    except Exception:
+        pass
+
+    # 3. GitHubへの非同期コミット (Streamlit Cloud再起動対策: 1回にまとめて送信)
     if gh_token and gh_repo:
         msg = f"Update watchlist: {len(clean_list)} items (changed: {trigger_code})"
         t_gh = threading.Thread(target=_sync_to_github_worker, args=(gh_token, gh_repo, json_str, msg), daemon=True)
@@ -2003,9 +2024,63 @@ def main():
     df_hist = normalize_history(raw_hist)
     df_mast = normalize_master(raw_mast)
 
-    # 監視リストのロード（ローカル + GitHub API の多層フェイルオーバーで再起動時の初期化を完全防止）
+    # 監視リストのロード（ローカル + GitHub API + URLクエリパラメータの多層フェイルオーバー）
     if "watchlist" not in st.session_state:
         st.session_state["watchlist"] = load_initial_watchlist(df_mast=df_mast)
+
+    # URLクエリパラメータに現在リストを常時保持（ブラウザの開き直し・リロード対策）
+    current_watch_str = ",".join(st.session_state["watchlist"]) if st.session_state["watchlist"] else "none"
+    if st.query_params.get("watch") != current_watch_str:
+        try:
+            st.query_params["watch"] = current_watch_str
+        except Exception:
+            pass
+
+    # ブラウザ localStorage 連携スクリプト（素のURLで開き直した際の自動リカバリ＆リアルタイム同期）
+    try:
+        watch_json_for_js = json.dumps(st.session_state["watchlist"], ensure_ascii=False)
+        sync_js = f"""
+        <script>
+        (function() {{
+            try {{
+                const KEY = "yutai_watchlist_storage";
+                const currentList = {watch_json_for_js};
+                
+                // 1. 現在の有効な監視リストをブラウザの localStorage に永続保存
+                if (currentList && currentList.length > 0) {{
+                    try {{ window.parent.localStorage.setItem(KEY, JSON.stringify(currentList)); }} catch(e) {{}}
+                    try {{ localStorage.setItem(KEY, JSON.stringify(currentList)); }} catch(e) {{}}
+                }}
+
+                // 2. 親ウィンドウのURLに watch パラメータがなく、localStorage に保存値がある場合は自動リカバリ
+                try {{
+                    const pUrl = new URL(window.parent.location.href);
+                    if (!pUrl.searchParams.has("watch")) {{
+                        let saved = null;
+                        try {{ saved = window.parent.localStorage.getItem(KEY); }} catch(e) {{}}
+                        if (!saved) {{
+                            try {{ saved = localStorage.getItem(KEY); }} catch(e) {{}}
+                        }}
+                        if (saved) {{
+                            const arr = JSON.parse(saved);
+                            if (Array.isArray(arr) && arr.length > 0) {{
+                                const syncedFlag = window.parent.sessionStorage.getItem("yutai_synced_once");
+                                if (!syncedFlag) {{
+                                    window.parent.sessionStorage.setItem("yutai_synced_once", "true");
+                                    pUrl.searchParams.set("watch", arr.join(","));
+                                    window.parent.location.replace(pUrl.toString());
+                                }}
+                            }}
+                        }}
+                    }}
+                }} catch(e) {{}}
+            }} catch(err) {{}}
+        }})();
+        </script>
+        """
+        st.components.v1.html(sync_js, height=0, width=0)
+    except Exception:
+        pass
 
     df_analyzed, stats, all_timestamps = analyze_stocks(
         df_hist, df_mast,
@@ -2091,6 +2166,20 @@ def main():
                                 persist_watchlist(st.session_state["watchlist"], gh_token, gh_repo, trigger_code=wc)
                                 st.toast(f"🗑️ {wc} を解除しました")
                                 st.rerun()
+
+        # 監視リスト一括コピー・復元 (バックアップ・別端末移行用)
+        with st.expander("📋 監視リスト一括コピー / 復元", expanded=False):
+            st.caption("登録中の銘柄コードをまとめてコピー、または貼り付けて一括反映できます。")
+            cur_csv_str = ", ".join(st.session_state["watchlist"])
+            bulk_input = st.text_area("銘柄コード（カンマまたは改行区切り）", value=cur_csv_str, height=70, key="sidebar_bulk_watchlist")
+            if st.button("💾 まとめて反映", use_container_width=True, key="sidebar_btn_bulk_save"):
+                raw_codes = re.findall(r"\d{4}", bulk_input)
+                new_clean = sorted(list(set(fmt_code(c) for c in raw_codes if c)))
+                st.session_state["watchlist"] = new_clean
+                st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
+                persist_watchlist(st.session_state["watchlist"], gh_token, gh_repo, trigger_code="bulk")
+                st.toast(f"✅ {len(new_clean)} 銘柄を一括保存しました！")
+                st.rerun()
 
     # ステータスバー (インデントなしで安全に描画)
     nikko_status_label = f"銘柄別自動 ({auto_days_month}日等)" if new_mode == "auto" else f"{effective_lend_days}日分"
