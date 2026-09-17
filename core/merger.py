@@ -23,6 +23,25 @@ from typing import Any
 import config
 from scrapers.routine_yutai import extract_yutai_value
 
+# 上場廃止・持株会社統合・TOB成立済みの過去銘柄リスト（データ混入遮断用）
+DELISTED_CODES = {
+    "2352",  # ＷＯＷ　ＷＯＲＬＤ (上場廃止・持株会社化)
+    "3254",  # プレサンスコーポレーション (オープンハウスTOB上場廃止)
+    "3528",  # ミライノベート (Jトラスト吸収合併上場廃止)
+    "3814",  # アルファクス・フード・システム (上場廃止)
+    "4333",  # 東邦システムサイエンス (TOB上場廃止)
+    "4653",  # ダイオーズ (MBO上場廃止)
+    "6628",  # オンキヨー (債務超過上場廃止)
+    "7118",  # 伸和ホールディングス (取引不能)
+    "8356",  # 十六銀行 (十六FG設立に伴い上場廃止)
+    "8397",  # 沖縄海邦銀行 (非対象/統合)
+    "8521",  # 長野銀行 (八十二銀行経営統合上場廃止)
+    "9014",  # 新京成電鉄 (京成電鉄完全子会社化上場廃止)
+    "9266",  # 一休 (TOB上場廃止)
+    "9479",  # インプレスホールディングス (TOB上場廃止)
+    "9728",  # 日本管財 (日本管財HD[9347]設立に伴い上場廃止)
+}
+
 
 def _fmt(v: Any, ndigits: int = 0) -> Any:
     if v is None or v == "":
@@ -120,6 +139,8 @@ def build_rows(
     all_codes = sorted(set(rmap) | set(gmap))
 
     for code in all_codes:
+        if str(code).strip().zfill(4) in DELISTED_CODES:
+            continue
         r = rmap.get(code)
         g = gmap.get(code, {})
 

@@ -224,7 +224,26 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v12.5 (Smooth Continuous Watchlist Toggling & Scroll Lock)"
+APP_VERSION = "v12.6 (Delisted Stocks Purged & 100% Valid Coverage)"
+
+# 上場廃止・持株会社統合・TOB成立済みの過去銘柄（画面・分析・集計から完全除外）
+DELISTED_CODES = {
+    "2352",  # ＷＯＷ　ＷＯＲＬＤ (上場廃止・持株会社化)
+    "3254",  # プレサンスコーポレーション (オープンハウスTOB上場廃止)
+    "3528",  # ミライノベート (Jトラスト吸収合併上場廃止)
+    "3814",  # アルファクス・フード・システム (上場廃止)
+    "4333",  # 東邦システムサイエンス (TOB上場廃止)
+    "4653",  # ダイオーズ (MBO上場廃止)
+    "6628",  # オンキヨー (債務超過上場廃止)
+    "7118",  # 伸和ホールディングス (取引不能)
+    "8356",  # 十六銀行 (十六FG設立に伴い上場廃止)
+    "8397",  # 沖縄海邦銀行 (非対象/統合)
+    "8521",  # 長野銀行 (八十二銀行経営統合上場廃止)
+    "9014",  # 新京成電鉄 (京成電鉄完全子会社化上場廃止)
+    "9266",  # 一休 (TOB上場廃止)
+    "9479",  # インプレスホールディングス (TOB上場廃止)
+    "9728",  # 日本管財 (日本管財HD[9347]設立に伴い上場廃止)
+}
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -1325,6 +1344,7 @@ def normalize_history(df: pd.DataFrame) -> pd.DataFrame:
 
     if "code" in d.columns:
         d["code"] = d["code"].apply(fmt_code)
+        d = d[~d["code"].isin(DELISTED_CODES)]
 
     for col in ["nikko", "rakuten", "kabu"]:
         if col in d.columns:
@@ -1361,6 +1381,7 @@ def normalize_master(df: pd.DataFrame) -> pd.DataFrame:
 
     if "code" in d.columns:
         d["code"] = d["code"].apply(fmt_code)
+        d = d[~d["code"].isin(DELISTED_CODES)]
     return d
 
 # ============================================================
@@ -1428,6 +1449,8 @@ def analyze_stocks(
 
     for _, row in df_latest.iterrows():
         code = row.get("code", "")
+        if str(code).strip().zfill(4) in DELISTED_CODES:
+            continue
         name = row.get("name", "")
         prev_row = prev_map.get(code)
         prev_day_row = prev_day_map.get(code)
