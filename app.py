@@ -224,7 +224,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v12.6 (Delisted Stocks Purged & 100% Valid Coverage)"
+APP_VERSION = "v12.7 (Fixed Expired Labels & Unified GitHub Cloud Scrape Sync)"
 
 # 上場廃止・持株会社統合・TOB成立済みの過去銘柄（画面・分析・集計から完全除外）
 DELISTED_CODES = {
@@ -1132,6 +1132,32 @@ def persist_watchlist(current_list: List[str], gh_token: str, gh_repo: str, trig
         t_gh = threading.Thread(target=_sync_to_github_worker, args=(gh_token, gh_repo, json_str, msg), daemon=True)
         t_gh.start()
 
+def sync_scraped_data_to_github(target_month: str, gh_token: str, gh_repo: str):
+    """直接スクレイピングで生成された最新の history および master CSV を GitHub へ非同期コミット"""
+    if not (gh_token and gh_repo):
+        return
+    try:
+        h_csvs = sorted(DATA_DIR.glob(f"history_{target_month}_*.csv"))
+        m_csvs = sorted(DATA_DIR.glob(f"master_{target_month}_*.csv"))
+        if h_csvs:
+            latest_h = h_csvs[-1]
+            msg_h = f"Auto update {target_month} stock data via Web UI: {latest_h.name}"
+            threading.Thread(
+                target=_sync_to_github_worker,
+                args=(gh_token, gh_repo, latest_h.read_text(encoding="utf-8-sig"), msg_h, f"data/{latest_h.name}"),
+                daemon=True
+            ).start()
+        if m_csvs:
+            latest_m = m_csvs[-1]
+            msg_m = f"Auto update {target_month} master data via Web UI: {latest_m.name}"
+            threading.Thread(
+                target=_sync_to_github_worker,
+                args=(gh_token, gh_repo, latest_m.read_text(encoding="utf-8-sig"), msg_m, f"data/{latest_m.name}"),
+                daemon=True
+            ).start()
+    except Exception:
+        pass
+
 # --- ユーザー設定（野村担保ローン借入額・日興貸株日数）永続化マネージャー ---
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "nomura_loan_man": 0.0,
@@ -1590,6 +1616,12 @@ def analyze_stocks(
         nomura_item_daily_interest = 0
 
         is_expired = (item_lend_days == 0 and is_auto_days)
+        saving_1d = 0
+        saving_2d = 0
+        saving_str = "―"
+        wait_days = None
+        wait_label = "―"
+
         if is_expired:
             signal = "⚪ 権利落済"
             signal_rank = 6
@@ -1597,6 +1629,7 @@ def analyze_stocks(
             nikko_cost_str = "権利落済"
             net_profit_nikko = None
             net_profit_nikko_str = "―"
+            saving_str = "権利落済"
             wait_label = "🏁権利落"
         elif funds_yen < 99999990 and funds_yen > 0:
             nikko_cost = calc_nikko_cost(funds_yen, lend_days=item_lend_days)
@@ -1613,35 +1646,29 @@ def analyze_stocks(
                         limit_days_int = int(round(yutai_val / daily_cost))
                 except Exception: pass
 
-        # 待機節約額（あと1日・2日待機した場合に削減できる日興貸株料）
-        saving_1d = 0
-        saving_2d = 0
-        saving_str = "―"
-        if funds_yen < 99999990 and funds_yen > 0:
+            # 待機節約額（あと1日・2日待機した場合に削減できる日興貸株料）
             saving_1d = int(round(funds_yen * DEFAULT_NIKKO_LEND_RATE / 365.0))
             saving_2d = saving_1d * 2
             if saving_1d > 0:
                 saving_str = f"1日:-¥{saving_1d:,} (2日:-¥{saving_2d:,})"
 
-        # 損益分岐待機日数（優待価値から現行コストを引いた余力日数）
-        wait_days = None
-        wait_label = "―"
-        if funds_yen < 99999990 and funds_yen > 0 and yutai_val is not None and yutai_val > 0:
-            wait_days = calc_breakeven_wait_days(
-                yutai_val=yutai_val,
-                funds_yen=funds_yen,
-                current_nikko_cost=nikko_cost,
-                nomura_daily_cost=nomura_item_daily_interest
-            )
-            if wait_days is not None:
-                if wait_days > 30:
-                    wait_label = f"🟢黒字(余裕{wait_days}日)"
-                elif wait_days > 0:
-                    wait_label = f"🟢黒字(余力{wait_days}日)"
-                elif wait_days == 0:
-                    wait_label = "⚠️損益±0"
-                else:
-                    wait_label = f"🚨赤字(あと{abs(wait_days)}日待機)"
+            # 損益分岐待機日数（優待価値から現行コストを引いた余力日数）
+            if yutai_val is not None and yutai_val > 0:
+                wait_days = calc_breakeven_wait_days(
+                    yutai_val=yutai_val,
+                    funds_yen=funds_yen,
+                    current_nikko_cost=nikko_cost,
+                    nomura_daily_cost=nomura_item_daily_interest
+                )
+                if wait_days is not None:
+                    if wait_days > 30:
+                        wait_label = f"🟢黒字(余裕{wait_days}日)"
+                    elif wait_days > 0:
+                        wait_label = f"🟢黒字(余力{wait_days}日)"
+                    elif wait_days == 0:
+                        wait_label = "⚠️損益±0"
+                    else:
+                        wait_label = f"🚨赤字(あと{abs(wait_days)}日待機)"
 
         is_watch = (code in watchlist)
         c_trend = trend_map.get(str(code), {})
@@ -1943,7 +1970,8 @@ def main():
                 with st.spinner(f"{chosen_month} の最新データを取得中..."):
                     ok, msg = run_direct_scrape(rights_arg=chosen_month)
                     if ok:
-                        st.toast("取得成功！")
+                        sync_scraped_data_to_github(chosen_month, gh_token, gh_repo)
+                        st.toast("✅ 最新取得＆クラウド同期完了！")
                         st.rerun()
                     else:
                         st.error(msg)
@@ -1965,7 +1993,8 @@ def main():
                 with st.spinner(f"{chosen_month} の優待データをスクレイピング取得中..."):
                     ok, msg = run_direct_scrape(rights_arg=chosen_month)
                     if ok:
-                        st.toast(f"{chosen_month} のデータ取得に成功しました！")
+                        sync_scraped_data_to_github(chosen_month, gh_token, gh_repo)
+                        st.toast(f"✅ {chosen_month} のデータ取得＆クラウド同期完了！")
                         st.rerun()
                     else:
                         st.error(msg)
@@ -2353,17 +2382,8 @@ def main():
             with st.spinner(f"⚡ {chosen_month} の最新在庫データを直接スクレイピング中 (数秒)..."):
                 ok, msg = run_direct_scrape(rights_arg=chosen_month)
                 if ok:
+                    sync_scraped_data_to_github(chosen_month, gh_token, gh_repo)
                     st.toast("✅ " + msg)
-                    # もしGitHub Tokenがあれば非同期でGitHubへも自動プッシュ
-                    if gh_token and gh_repo:
-                        try:
-                            # 最新CSVをGitHubへ自動コミット
-                            latest_csvs = sorted(DATA_DIR.glob(f"history_{chosen_month}_*.csv"))
-                            if latest_csvs:
-                                l_csv = latest_csvs[-1]
-                                c_msg = f"Auto update {chosen_month} stock data via Web UI: {l_csv.name}"
-                                threading.Thread(target=_sync_to_github_worker, args=(gh_token, gh_repo, l_csv.read_text(encoding="utf-8-sig"), c_msg, f"data/{l_csv.name}"), daemon=True).start()
-                        except Exception: pass
                     st.rerun()
                 else:
                     ok_gh, msg_gh = trigger_github_workflow(token=gh_token, repo=gh_repo)
