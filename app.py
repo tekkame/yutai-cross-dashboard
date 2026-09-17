@@ -224,7 +224,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v12.8 (Perpetual Watchlist: QueryParams & LocalStorage Multi-Layer Sync)"
+APP_VERSION = "v12.9 (Zero-Reload Instant Watchlist Check & Non-Destructive Sync)"
 
 # 上場廃止・持株会社統合・TOB成立済みの過去銘柄（画面・分析・集計から完全除外）
 DELISTED_CODES = {
@@ -2052,9 +2052,13 @@ def main():
                     try {{ localStorage.setItem(KEY, JSON.stringify(currentList)); }} catch(e) {{}}
                 }}
 
-                // 2. 親ウィンドウのURLに watch パラメータがなく、localStorage に保存値がある場合は自動リカバリ
+                // 2. URL の watch パラメータをリロードなしで静かに同期
                 try {{
                     const pUrl = new URL(window.parent.location.href);
+                    const curParam = pUrl.searchParams.get("watch");
+                    const targetWatch = (currentList && currentList.length > 0) ? currentList.join(",") : "none";
+                    
+                    // 初回アクセス時（watchパラメータ未設定でlocalStorageに前データがある場合）のみ一度だけリカバリ
                     if (!pUrl.searchParams.has("watch")) {{
                         let saved = null;
                         try {{ saved = window.parent.localStorage.getItem(KEY); }} catch(e) {{}}
@@ -2069,9 +2073,16 @@ def main():
                                     window.parent.sessionStorage.setItem("yutai_synced_once", "true");
                                     pUrl.searchParams.set("watch", arr.join(","));
                                     window.parent.location.replace(pUrl.toString());
+                                    return;
                                 }}
                             }}
                         }}
+                    }}
+                    
+                    // 通常時は画面リロードを起こさず、history.replaceState でアドレスバーだけ静かに更新
+                    if (curParam !== targetWatch) {{
+                        pUrl.searchParams.set("watch", targetWatch);
+                        window.parent.history.replaceState({{}}, "", pUrl.toString());
                     }}
                 }} catch(e) {{}}
             }} catch(err) {{}}
@@ -2649,10 +2660,9 @@ def main():
                     if removed_c:
                         st.toast(f"🗑️ 監視を解除: {', '.join(removed_c)}", icon="🗑️")
 
-                # ★最重要改善: チェック操作時は editor_version をインクリメントしない！
-                # キーを変えないことで、テーブルDOMが破棄されずスクロール位置が1pxも動かずに維持され、
-                # ユーザーが表を見ながら連続で快適にポチポチとチェックできる！
-                st.rerun()
+                # ★最重要改善: チェック操作時は st.rerun() を呼ばない！
+                # これによりページ全体のリロードや画面のリセット、スクロールの巻き戻りが一切起きず、
+                # ユーザーが現在位置にとどまったまま連続でサクサクとチェックできる！
 
     # ----------------------------------------------------
     # TAB 2: 日時別 在庫推移マトリクス
