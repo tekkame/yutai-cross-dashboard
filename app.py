@@ -224,7 +224,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v12.10 (Double Instant Client Sync & 100% Guaranteed Non-Reset)"
+APP_VERSION = "v13.0 (Watchlist v13: Cache Purged & 13 Stocks Synchronized)"
 
 # 上場廃止・持株会社統合・TOB成立済みの過去銘柄（画面・分析・集計から完全除外）
 DELISTED_CODES = {
@@ -1032,18 +1032,20 @@ def reload_watchlist_fresh() -> List[str]:
         return remote_codes
     return load_watchlist_from_disk()
 
+WATCH_VERSION = "v13"
+
 def load_initial_watchlist(df_mast: Optional[pd.DataFrame] = None) -> List[str]:
-    """監視リストを多層フェイルオーバーで堅牢にロード（ブラウザ開き直し・Streamlit Cloud再起動時の初期化を完全防止）
-    ⓪ URLクエリパラメータ (?watch=3088,3167,... または ?watch=none) 【最優先・ブラウザ再読み込み耐性】
-    ① ローカルの data/watchlist.json
+    """監視リストを多層フェイルオーバーで堅牢にロード
+    ⓪ 最新バージョンのURLクエリパラメータ (?watch=...&watch_v=v13)
+    ① ローカルの data/watchlist.json (サーバー側マスター)
     ② GitHub リポジトリ上の最新 data/watchlist.json
-    ③ Google スプレッドシート（master_list の監視列=TRUE）
-    ④ デフォルト6銘柄
+    ③ デフォルト13銘柄
     """
-    # 0. URLクエリパラメータ確認 (ブラウザ開き直し・リロード・ブックマーク対策の最優先レイヤー)
+    # 0. URLクエリパラメータ確認（現行バージョン一致時のみURLを信頼し、古いURLによる逆上書きを完全防止）
     try:
+        url_v = str(st.query_params.get("watch_v", "")).strip()
         url_watch = str(st.query_params.get("watch", "")).strip()
-        if url_watch:
+        if url_v == WATCH_VERSION and url_watch:
             if url_watch.lower() in ("none", "empty", "clear", "0"):
                 save_watchlist_to_disk([])
                 return []
@@ -1054,43 +1056,28 @@ def load_initial_watchlist(df_mast: Optional[pd.DataFrame] = None) -> List[str]:
     except Exception:
         pass
 
-    # 1. ローカルディスク確認
+    # 1. ローカルディスク確認（サーバー上の最新 data/watchlist.json を最優先）
     local_codes = None
     if WATCHLIST_FILE.exists():
         try:
             codes = json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
-            if isinstance(codes, list):
+            if isinstance(codes, list) and len(codes) > 0:
                 local_codes = [fmt_code(c) for c in codes if c]
         except Exception:
             pass
 
-    # ローカルがデフォルト6銘柄と異なりユーザー追加・削除済みなら最優先信頼
-    if local_codes is not None and len(local_codes) > 0 and set(local_codes) != set(DEFAULT_WATCHLIST):
+    if local_codes is not None and len(local_codes) > 0:
         return local_codes
 
     # 2. GitHub リポジトリから直接最新の watchlist.json を取得（Cloudコンテナ再起動対策）
     gh_token = get_github_token()
     gh_repo = safe_get_secret("GITHUB_REPO", "tekkame/yutai-cross-dashboard")
     remote_codes = fetch_watchlist_from_github(gh_token, gh_repo)
-    if remote_codes is not None and len(remote_codes) > 0 and set(remote_codes) != set(DEFAULT_WATCHLIST):
-        save_watchlist_to_disk(remote_codes)  # ローカルディスクも同期
+    if remote_codes is not None and len(remote_codes) > 0:
+        save_watchlist_to_disk(remote_codes)
         return remote_codes
 
-    # 3. ローカルに正常なリストがあればそれを採用 (空リスト含む)
-    if local_codes is not None and len(local_codes) > 0:
-        return local_codes
-
-    # 4. Google スプレッドシートの master_list に監視フラグがある場合のフォールバック
-    if df_mast is not None and not df_mast.empty:
-        for c_col in ["watch", "監視", "監視フラグ", "⭐"]:
-            if c_col in df_mast.columns:
-                sub = df_mast[df_mast[c_col].astype(str).str.lower().isin(["true", "1", "◎", "〇"])]
-                if not sub.empty and "code" in sub.columns:
-                    s_codes = [fmt_code(c) for c in sub["code"].tolist() if c]
-                    if s_codes:
-                        save_watchlist_to_disk(s_codes)
-                        return s_codes
-
+    # 3. デフォルト13銘柄
     return DEFAULT_WATCHLIST.copy()
 
 # --- 非同期同期ワーカー (GitHub API) ---
@@ -1141,8 +1128,9 @@ def persist_watchlist(current_list: List[str], gh_token: str, gh_repo: str, trig
     # 1. ローカル保存 (即時)
     save_watchlist_to_disk(clean_list)
 
-    # 2. URLクエリパラメータに即時反映（ブラウザの開き直し・リロード・ブックマークで100%保持）
+    # 2. URLクエリパラメータに即時反映（最新バージョンタグ付き）
     try:
+        st.query_params["watch_v"] = WATCH_VERSION
         st.query_params["watch"] = ",".join(clean_list) if clean_list else "none"
     except Exception:
         pass
@@ -2043,9 +2031,13 @@ def main():
         <script>
         (function() {{
             try {{
-                const KEY = "yutai_watchlist_storage";
+                const KEY = "yutai_watchlist_v13";
                 const currentList = {watch_json_for_js};
                 
+                // 古いキャッシュキーを確実に消去
+                try {{ window.parent.localStorage.removeItem("yutai_watchlist_storage"); }} catch(e) {{}}
+                try {{ localStorage.removeItem("yutai_watchlist_storage"); }} catch(e) {{}}
+
                 // 1. 現在の有効な監視リストをブラウザの localStorage に永続保存
                 if (currentList && currentList.length > 0) {{
                     try {{ window.parent.localStorage.setItem(KEY, JSON.stringify(currentList)); }} catch(e) {{}}
@@ -2068,6 +2060,7 @@ def main():
                         if (saved) {{
                             const arr = JSON.parse(saved);
                             if (Array.isArray(arr) && arr.length > 0) {{
+                                pUrl.searchParams.set("watch_v", "v13");
                                 pUrl.searchParams.set("watch", arr.join(","));
                                 window.parent.location.replace(pUrl.toString());
                                 return;
@@ -2077,6 +2070,7 @@ def main():
                     
                     // 通常時は画面リロードを起こさず、history.replaceState でアドレスバーだけ静かに更新
                     if (curParam !== targetWatch) {{
+                        pUrl.searchParams.set("watch_v", "v13");
                         pUrl.searchParams.set("watch", targetWatch);
                         window.parent.history.replaceState({{}}, "", pUrl.toString());
                     }}
@@ -2173,6 +2167,15 @@ def main():
                                 persist_watchlist(st.session_state["watchlist"], gh_token, gh_repo, trigger_code=wc)
                                 st.toast(f"🗑️ {wc} を解除しました")
                                 st.rerun()
+
+        # サーバー側マスター（13銘柄）に同期するボタン
+        if st.button("🔄 サーバー最新（13銘柄）に同期", use_container_width=True, key="sidebar_btn_sync_server", help="ブラウザキャッシュを破棄し、サーバー/GitHub上の最新リストに強制同期します"):
+            fresh_list = reload_watchlist_fresh()
+            st.session_state["watchlist"] = fresh_list
+            st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
+            persist_watchlist(st.session_state["watchlist"], gh_token, gh_repo, trigger_code="server_sync")
+            st.toast(f"✅ サーバー最新リスト ({len(fresh_list)}銘柄) に同期しました！")
+            st.rerun()
 
         # 監視リスト一括コピー・復元 (バックアップ・別端末移行用)
         with st.expander("📋 監視リスト一括コピー / 復元", expanded=False):
@@ -2664,10 +2667,11 @@ def main():
                         <script>
                         (function() {{
                             try {{
-                                const KEY = "yutai_watchlist_storage";
+                                const KEY = "yutai_watchlist_v13";
                                 const codes = {instant_json};
                                 window.parent.localStorage.setItem(KEY, JSON.stringify(codes));
                                 const pUrl = new URL(window.parent.location.href);
+                                pUrl.searchParams.set("watch_v", "v13");
                                 pUrl.searchParams.set("watch", codes.length > 0 ? codes.join(",") : "none");
                                 window.parent.history.replaceState({{}}, "", pUrl.toString());
                             }} catch(e) {{}}
