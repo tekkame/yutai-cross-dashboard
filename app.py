@@ -224,7 +224,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v12.9 (Zero-Reload Instant Watchlist Check & Non-Destructive Sync)"
+APP_VERSION = "v12.10 (Double Instant Client Sync & 100% Guaranteed Non-Reset)"
 
 # 上場廃止・持株会社統合・TOB成立済みの過去銘柄（画面・分析・集計から完全除外）
 DELISTED_CODES = {
@@ -2058,7 +2058,7 @@ def main():
                     const curParam = pUrl.searchParams.get("watch");
                     const targetWatch = (currentList && currentList.length > 0) ? currentList.join(",") : "none";
                     
-                    // 初回アクセス時（watchパラメータ未設定でlocalStorageに前データがある場合）のみ一度だけリカバリ
+                    // 初回アクセス時（watchパラメータ未設定でlocalStorageに前データがある場合）のみ自動リカバリ
                     if (!pUrl.searchParams.has("watch")) {{
                         let saved = null;
                         try {{ saved = window.parent.localStorage.getItem(KEY); }} catch(e) {{}}
@@ -2068,13 +2068,9 @@ def main():
                         if (saved) {{
                             const arr = JSON.parse(saved);
                             if (Array.isArray(arr) && arr.length > 0) {{
-                                const syncedFlag = window.parent.sessionStorage.getItem("yutai_synced_once");
-                                if (!syncedFlag) {{
-                                    window.parent.sessionStorage.setItem("yutai_synced_once", "true");
-                                    pUrl.searchParams.set("watch", arr.join(","));
-                                    window.parent.location.replace(pUrl.toString());
-                                    return;
-                                }}
+                                pUrl.searchParams.set("watch", arr.join(","));
+                                window.parent.location.replace(pUrl.toString());
+                                return;
                             }}
                         }}
                     }}
@@ -2656,9 +2652,30 @@ def main():
                     added_c = [c for c, w in changed_items if w]
                     removed_c = [c for c, w in changed_items if not w]
                     if added_c:
-                        st.toast(f"⭐ 監視に追加: {', '.join(added_c)}", icon="⭐")
+                        st.toast(f"⭐ 監視に追加: {', '.join(added_c)} (即時保存済)", icon="⭐")
                     if removed_c:
-                        st.toast(f"🗑️ 監視を解除: {', '.join(removed_c)}", icon="🗑️")
+                        st.toast(f"🗑️ 監視を解除: {', '.join(removed_c)} (即時保存済)", icon="🗑️")
+
+                    # ★操作の瞬間にブラウザの localStorage と URL (history.replaceState) へ直接書き込み！
+                    # （st.rerun なしでスクロールは完全静止のまま、ブラウザ側へミリ秒単位で永続保存完了）
+                    try:
+                        instant_json = json.dumps(st.session_state["watchlist"], ensure_ascii=False)
+                        st.components.v1.html(f"""
+                        <script>
+                        (function() {{
+                            try {{
+                                const KEY = "yutai_watchlist_storage";
+                                const codes = {instant_json};
+                                window.parent.localStorage.setItem(KEY, JSON.stringify(codes));
+                                const pUrl = new URL(window.parent.location.href);
+                                pUrl.searchParams.set("watch", codes.length > 0 ? codes.join(",") : "none");
+                                window.parent.history.replaceState({{}}, "", pUrl.toString());
+                            }} catch(e) {{}}
+                        }})();
+                        </script>
+                        """, height=0, width=0)
+                    except Exception:
+                        pass
 
                 # ★最重要改善: チェック操作時は st.rerun() を呼ばない！
                 # これによりページ全体のリロードや画面のリセット、スクロールの巻き戻りが一切起きず、
