@@ -224,7 +224,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v12.4 (Default Min Funds Sort & Auto Price Share Estimator)"
+APP_VERSION = "v12.5 (Smooth Continuous Watchlist Toggling & Scroll Lock)"
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
@@ -2449,7 +2449,7 @@ def main():
             # ★連鎖ループ防止: エディタキーを動的バージョン化し、編集時にキーを切り替えて古い行インデックスのキャッシュを完全破棄
             if "editor_version" not in st.session_state:
                 st.session_state["editor_version"] = 0
-            editor_key = f"yutai_data_editor_{st.session_state['editor_version']}"
+            editor_key = f"yutai_data_editor_{chosen_month}_{st.session_state['editor_version']}"
 
             nikko_col_help = (
                 "SMBC日興証券 一般信用売＋制度買現引（ダイレクトコース）。各銘柄の権利確定月・20日権利日・祝日・受渡日を完全自動判定した想定コスト"
@@ -2510,10 +2510,16 @@ def main():
                         gh_repo,
                         trigger_code=",".join(changed_codes)
                     )
+                    added_c = [c for c, w in changed_items if w]
+                    removed_c = [c for c, w in changed_items if not w]
+                    if added_c:
+                        st.toast(f"⭐ 監視に追加: {', '.join(added_c)}", icon="⭐")
+                    if removed_c:
+                        st.toast(f"🗑️ 監視を解除: {', '.join(removed_c)}", icon="🗑️")
 
-                # ★最重要: エディタキーのバージョンを上げて前回の編集キャッシュを完全リフレッシュ！
-                st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
-                # 即時再描画（これで連鎖ループは100%完全に防がれる！）
+                # ★最重要改善: チェック操作時は editor_version をインクリメントしない！
+                # キーを変えないことで、テーブルDOMが破棄されずスクロール位置が1pxも動かずに維持され、
+                # ユーザーが表を見ながら連続で快適にポチポチとチェックできる！
                 st.rerun()
 
     # ----------------------------------------------------
