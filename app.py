@@ -59,6 +59,45 @@ html, body, [class*="css"] {
     letter-spacing: -0.015em;
 }
 
+/* 全体ダークモード基調 */
+.stApp {
+    background-color: #0b0f19 !important;
+    color: #f1f5f9 !important;
+}
+
+/* サイドバー */
+section[data-testid="stSidebar"] {
+    background-color: #0d1322 !important;
+    border-right: 1px solid #1e293b !important;
+}
+
+section[data-testid="stSidebar"] hr {
+    border-color: #1e293b !important;
+}
+
+section[data-testid="stSidebar"] .stMarkdown h1,
+section[data-testid="stSidebar"] .stMarkdown h2,
+section[data-testid="stSidebar"] .stMarkdown h3,
+section[data-testid="stSidebar"] .stMarkdown h4,
+section[data-testid="stSidebar"] .stMarkdown h5 {
+    color: #f8fafc !important;
+}
+
+/* メインヘッダー */
+header[data-testid="stHeader"] {
+    background-color: rgba(11, 15, 25, 0.85) !important;
+    backdrop-filter: blur(8px) !important;
+    border-bottom: 1px solid #1e293b !important;
+}
+
+/* テキスト＆ラベル */
+label, .stMarkdown p, .stCaption, span {
+    color: #e2e8f0;
+}
+.stCaption {
+    color: #94a3b8 !important;
+}
+
 .main .block-container {
     padding-top: 0.4rem !important;
     padding-bottom: 1.2rem !important;
@@ -116,7 +155,7 @@ html, body, [class*="css"] {
     border-radius: 8px;
     padding: 0.65rem 0.9rem;
     margin-bottom: 0.5rem;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.1);
 }
 
 .target-header {
@@ -172,35 +211,154 @@ div[data-testid="stVerticalBlock"] > div {
     gap: 0.2rem !important;
 }
 
-.stTabs [data-baseweb="tab-list"] {
-    gap: 0.25rem;
-    margin-bottom: 0.25rem;
-}
-
-.stTabs [data-baseweb="tab"] {
-    padding: 0.25rem 0.65rem !important;
-    font-size: 11.5px !important;
-    font-weight: 600 !important;
-}
-
+/* ボタン群 */
 div.stButton > button {
-    padding: 0.2rem 0.55rem !important;
+    padding: 0.22rem 0.6rem !important;
     font-size: 11.5px !important;
-    border-radius: 4px !important;
+    border-radius: 5px !important;
     min-height: auto !important;
+    background-color: #1e293b !important;
+    color: #f1f5f9 !important;
+    border: 1px solid #334155 !important;
+    transition: all 0.15s ease-in-out !important;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.25) !important;
+}
+div.stButton > button:hover {
+    background-color: #2563eb !important;
+    color: #ffffff !important;
+    border-color: #3b82f6 !important;
+    box-shadow: 0 0 8px rgba(59, 130, 246, 0.4) !important;
+}
+div.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%) !important;
+    color: #ffffff !important;
+    border: 1px solid #3b82f6 !important;
+    box-shadow: 0 2px 4px rgba(37, 99, 235, 0.3) !important;
+}
+div.stButton > button[kind="primary"]:hover {
+    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
+    box-shadow: 0 0 12px rgba(59, 130, 246, 0.5) !important;
 }
 
+/* 入力欄（テキスト・数値） */
+div[data-baseweb="input"] {
+    background-color: #111827 !important;
+    border-color: #334155 !important;
+    border-radius: 5px !important;
+}
 div[data-baseweb="input"] input {
+    background-color: transparent !important;
+    color: #f8fafc !important;
     font-size: 11.5px !important;
     padding: 0.2rem 0.45rem !important;
 }
-
-div[data-baseweb="select"] {
-    font-size: 11.5px !important;
+div[data-baseweb="input"]:focus-within {
+    border-color: #38bdf8 !important;
+    box-shadow: 0 0 0 1px #38bdf8 !important;
 }
 
-div[data-testid="stDataFrame"] {
+/* セレクトボックス & マルチセレクト */
+div[data-baseweb="select"] > div {
+    background-color: #111827 !important;
+    color: #f8fafc !important;
+    border-color: #334155 !important;
+    border-radius: 5px !important;
+    font-size: 11.5px !important;
+}
+div[data-baseweb="select"] span {
+    color: #f8fafc !important;
+}
+div[data-baseweb="popover"] > div, ul[role="listbox"] {
+    background-color: #111827 !important;
+    border: 1px solid #334155 !important;
+    color: #f8fafc !important;
+}
+li[role="option"] {
+    color: #e2e8f0 !important;
+    background-color: transparent !important;
+}
+li[role="option"]:hover, li[role="option"][aria-selected="true"] {
+    background-color: #1e3a8a !important;
+    color: #93c5fd !important;
+}
+
+/* タブ */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 0.35rem;
+    margin-bottom: 0.35rem;
+    border-bottom: 1px solid #1e293b !important;
+    background-color: transparent !important;
+}
+.stTabs [data-baseweb="tab"] {
+    padding: 0.35rem 0.85rem !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    color: #94a3b8 !important;
+    border-radius: 4px 4px 0 0 !important;
+    border: none !important;
+    background-color: transparent !important;
+    transition: color 0.15s ease !important;
+}
+.stTabs [data-baseweb="tab"]:hover {
+    color: #cbd5e1 !important;
+}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+    color: #38bdf8 !important;
+    border-bottom: 2px solid #38bdf8 !important;
+}
+
+/* エキスパンダー */
+div[data-testid="stExpander"] {
+    background-color: #0f172a !important;
+    border: 1px solid #1e293b !important;
+    border-radius: 6px !important;
+    margin-bottom: 0.4rem !important;
+}
+div[data-testid="stExpander"] summary {
+    color: #f1f5f9 !important;
+    font-weight: 600 !important;
+}
+div[data-testid="stExpander"] summary:hover {
+    color: #38bdf8 !important;
+}
+div[data-testid="stExpander"] > div[role="region"] {
+    border-top: 1px solid #1e293b !important;
+    padding-top: 0.5rem !important;
+}
+
+/* チェックボックス */
+div[data-testid="stCheckbox"] label span[role="checkbox"] {
+    background-color: #111827 !important;
+    border-color: #475569 !important;
+}
+div[data-testid="stCheckbox"] label span[role="checkbox"][aria-checked="true"] {
+    background-color: #2563eb !important;
+    border-color: #3b82f6 !important;
+}
+
+/* テーブル & データグリッド */
+div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] {
     font-size: 11px !important;
+    border-radius: 6px !important;
+    border: 1px solid #1e293b !important;
+    overflow: hidden;
+    background-color: #0f172a !important;
+}
+
+/* スクロールバーのダークスタイル */
+::-webkit-scrollbar {
+    width: 7px;
+    height: 7px;
+}
+::-webkit-scrollbar-track {
+    background: #0b0f19;
+}
+::-webkit-scrollbar-thumb {
+    background: #1e293b;
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #334155;
 }
 </style>
 """
@@ -224,7 +382,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v13.0 (Watchlist v13: Cache Purged & 13 Stocks Synchronized)"
+APP_VERSION = "v13.1 (Unified Premium Dark Mode & Modern UI Aesthetics)"
 
 # 上場廃止・持株会社統合・TOB成立済みの過去銘柄（画面・分析・集計から完全除外）
 DELISTED_CODES = {
