@@ -101,17 +101,49 @@ def _num(raw: str) -> float | None:
     return float(m.group(0)) if m else None
 
 
-def extract_yutai_value(content: str) -> float | None:
-    """優待内容テキストから金額（円相当）を自動逆算"""
+# 既知の定性優待・割引券・非金銭優待の標準想定価値（円換算フォールバック用）
+KNOWN_YUTAI_VALUES: dict[str, float] = {
+    "2267": 1000.0,  # ヤクルト本社 (ライト会員入会権)
+    "2464": 1000.0,  # Aoba-BBT (割引券10%)
+    "2586": 1000.0,  # フルッタフルッタ (EC15%割引)
+    "2818": 1000.0,  # ピエトロ (通信販売10%割引)
+    "3529": 1000.0,  # アツギ (割引券30%)
+    "3569": 1500.0,  # セーレン (割引券20%)
+    "3710": 1980.0,  # ジョルダン (乗換案内PREMIUM半年利用権)
+    "3769": 1000.0,  # GMOペイメントゲートウェイ (ビットコイン付与)
+    "3861": 2000.0,  # 王子HD (植林活動イベント)
+    "4051": 1000.0,  # GMOフィナンシャルゲート (ビットコイン付与)
+    "4061": 2000.0,  # デンカ (化粧品優待価格販売)
+    "4376": 1000.0,  # くふうカンパニーHD (電子利用券・割引券)
+    "4539": 1000.0,  # 日本ケミファ (ヘルスケア特別販売)
+    "4543": 1000.0,  # テルモ (施設見学会)
+    "4719": 500.0,   # アルファS (カレンダー)
+    "7638": 1000.0,  # NEW ART HOLDINGS (割引カード)
+    "7578": 2000.0,  # ニチリョク (自社商品割引)
+    "7752": 1500.0,  # リコー (特別価格販売)
+}
+
+def extract_yutai_value(content: str, code: str = "") -> float | None:
+    """優待内容テキストから金額（円相当）を自動逆算。既知銘柄コードのフォールバック付き"""
+    c_norm = str(code).strip().zfill(4) if code else ""
+    if c_norm in KNOWN_YUTAI_VALUES:
+        return KNOWN_YUTAI_VALUES[c_norm]
+
     if not content:
         return None
-    t = content.replace(",", "").replace(" ", "")
+    t = content.replace(",", "").replace(" ", "").replace("　", "")
     patterns = [
         r"(\d+)円相当",
         r"(\d+)円分",
+        r"(\d+)円分",
+        r"(\d+)円の?買物券",
+        r"(\d+)円の?商品券",
+        r"(\d+)円の?ギフト券",
         r"(\d+)円",
         r"(\d+)ポイント",
         r"(\d+)P",
+        r"QUO.*?(\d+)円",
+        r"クオ.*?(\d+)円",
     ]
     for p in patterns:
         m = re.search(p, t)

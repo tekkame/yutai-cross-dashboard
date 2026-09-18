@@ -144,29 +144,37 @@ def build_rows(
         r = rmap.get(code)
         g = gmap.get(code, {})
 
-        # 1. 銘柄名 (ルーティン最優先)
-        name = (r.get("name") if r else None) or g.get("name") or ""
+        # 1. 銘柄名 (より正式・明瞭な名称を採用)
+        name = (g.get("name") if g else None) or (r.get("name") if r else None) or ""
+        if not name or name.lower() in ("null", "nan"):
+            name = (r.get("name") if r else None) or ""
         if not name or name.lower() in ("null", "nan"):
             continue
 
-        # 2. 優待内容 (ルーティン最優先)
-        content = (r.get("yutai_content") if r else None) or g.get("yutai_content") or g.get("yutai") or ""
+        # 2. 優待内容 (より詳細・具体的な方を優先採用)
+        r_content = (r.get("yutai_content") if r else "") or ""
+        g_content = (g.get("yutai_content") or g.get("yutai") if g else "") or ""
+        content = r_content if len(r_content) >= len(g_content) else g_content
+        if not content:
+            content = r_content or g_content
 
-        # 3. 優待価値 (ルーティン最優先、なければGokigen、なければテキストから逆算)
+        # 3. 優待価値 (ルーティン、Gokigen、テキスト逆算の順で有効な正の値を採用)
         yutai_val = (r.get("yutai_value") if r else None)
         if yutai_val is None or yutai_val == 0:
-            yutai_val = g.get("yutai_value")
+            yutai_val = g.get("yutai_value") if g else None
         if yutai_val is None or yutai_val == 0:
-            yutai_val = extract_yutai_value(content)
+            yutai_val = extract_yutai_value(content, code=code)
+        if yutai_val is None or yutai_val == 0:
+            yutai_val = extract_yutai_value(r_content, code=code) or extract_yutai_value(g_content, code=code)
 
-        # 4. 必要資金(万円) (ルーティン最優先、なければGokigen)
+        # 4. 必要資金(万円) (Gokigenまたはルーティンから取得、後で株価から再計算)
         funds_man = (r.get("funds_man") if r else None)
-        if funds_man is None:
+        if funds_man is None and g:
             funds_man = g.get("funds_man")
 
         # 株価・株数
-        kabuka = g.get("stock_price") or g.get("kabuka")
-        kabusu = g.get("kabusu")
+        kabuka = g.get("stock_price") or g.get("kabuka") if g else None
+        kabusu = g.get("kabusu") if g else None
         if kabusu is None or kabusu <= 0:
             m_sh = re.search(r"【(\d+)株】", content)
             kabusu = float(m_sh.group(1)) if m_sh else 100.0
@@ -188,41 +196,50 @@ def build_rows(
         elif kabuka is None and funds_man and funds_man > 0:
             kabuka = round(funds_man * 10000 / kabusu, 1)
 
-        # 5. 利回り (ルーティン最優先)
+        # 5. 利回り (優待価値と必要資金から高精度再計算)
         yield_pct = (r.get("yield_pct") if r else None)
-        if yield_pct is None:
+        if yield_pct is None and g:
             yield_pct = g.get("yield_pct")
         if (yield_pct is None or yield_pct == 0) and funds_man and yutai_val and funds_man > 0:
             yield_pct = round((yutai_val / (funds_man * 10000)) * 100, 2)
 
-        # 6. 在庫数値 (ルーティン最優先)
+        # 6. 在庫数値 (★最重要改善: 本日朝リアルタイム更新の Gokigen API を最優先！)
+        # ルーティンは1日前の静的HTMLのため、Gokigenに在庫データがない場合のみフォールバック採用
         # 日興
-        nikko_qty = (r.get("nikko_qty") if r else None)
-        if nikko_qty is None and g:
+        nikko_qty = None
+        if g and g.get("nikko_qty") is not None:
             nikko_qty = g.get("nikko_qty")
+        elif r and r.get("nikko_qty") is not None:
+            nikko_qty = r.get("nikko_qty")
 
         # 楽天
-        rakuten_qty = (r.get("rakuten_qty") if r else None)
-        if rakuten_qty is None and g:
+        rakuten_qty = None
+        if g and g.get("rakuten_qty") is not None:
             rakuten_qty = g.get("rakuten_qty")
+        elif r and r.get("rakuten_qty") is not None:
+            rakuten_qty = r.get("rakuten_qty")
 
         # カブ
-        kabu_qty = g.get("kabu_qty")
+        kabu_qty = g.get("kabu_qty") if g else None
 
-        # 7. SBI信号 (ルーティン最優先: ◎, ▲, ×)
-        sbi_signal = (r.get("sbi_signal") if r else None)
-        if not sbi_signal or sbi_signal == "―":
-            sbi_signal = g.get("sbi_signal") or "―"
+        # 7. SBI信号 (★最重要改善: 本日朝リアルタイム更新の Gokigen を最優先！)
+        sbi_signal = "―"
+        if g and g.get("sbi_signal") and g.get("sbi_signal") != "―":
+            sbi_signal = g.get("sbi_signal")
+        elif r and r.get("sbi_signal") and r.get("sbi_signal") != "―":
+            sbi_signal = r.get("sbi_signal")
 
         # 8. GMO信号 / 売建上限
         gmo_limit = (r.get("gmo_limit") if r else None)
-        gmo_signal = g.get("gmo_signal") or "―"
-        if r and r.get("gmo_qty") is not None:
+        gmo_signal = "―"
+        if g and g.get("gmo_signal") and g.get("gmo_signal") != "―":
+            gmo_signal = g.get("gmo_signal")
+        elif r and r.get("gmo_qty") is not None:
             gmo_signal = str(_fmt(r.get("gmo_qty")))
 
         # 9. 松井・マネックス
-        matsui_signal = g.get("matsui_signal") or "―"
-        monex_signal = g.get("monex_signal") or "―"
+        matsui_signal = g.get("matsui_signal") or "―" if g else "―"
+        monex_signal = g.get("monex_signal") or "―" if g else "―"
 
         # 貸株コスト試算
         cross_days = g.get("cross_days")

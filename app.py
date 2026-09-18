@@ -38,6 +38,7 @@ import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from scrapers.routine_yutai import KNOWN_YUTAI_VALUES
 
 # ============================================================
 # 1. ページ初期設定 & 超高密度CSS
@@ -382,7 +383,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
-APP_VERSION = "v13.1 (Unified Premium Dark Mode & Modern UI Aesthetics)"
+APP_VERSION = "v13.2 (Data Freshness Optimization & Dash Elimination & Precision Accuracy)"
 
 # 上場廃止・持株会社統合・TOB成立済みの過去銘柄（画面・分析・集計から完全除外）
 DELISTED_CODES = {
@@ -715,8 +716,9 @@ def to_int(v: Any) -> Optional[int]:
 
 def fmt_qty(v: Any) -> str:
     f = to_float(v)
-    if f is None: return "―"
+    if f is None: return "取扱無"
     if f >= 9999990: return "大量"
+    if f == 0: return "0 (枯渇)"
     if f >= 10000: return f"{f/10000:.1f}万"
     return f"{int(f):,}"
 
@@ -726,7 +728,7 @@ def parse_qty_safe(v: Any) -> Optional[float]:
         val = float(v)
         return None if np.isnan(val) else val
     s = str(v).strip().replace(",", "").replace(" ", "")
-    if s in ("", "-", "―", "ー", "null", "None", "nan", "取扱なし"): return None
+    if s in ("", "-", "―", "ー", "null", "None", "nan", "取扱なし", "取扱無"): return None
     if "残無" in s or s in ("×", "✕"): return 0.0
     if "大量" in s: return 9999999.0
     if s in ("◎", "▲"): return None
@@ -746,12 +748,12 @@ def fmt_code(v: Any) -> str:
     return s.zfill(4) if len(s) <= 4 and s.isdigit() else s
 
 def fmt_signal(v: Any) -> str:
-    if v is None or (not isinstance(v, str) and pd.isna(v)): return "―"
+    if v is None or (not isinstance(v, str) and pd.isna(v)): return "取扱無"
     s = str(v).strip()
-    if s in ("", "-", "―", "ー", "null", "None", "nan"): return "―"
+    if s in ("", "-", "―", "ー", "null", "None", "nan", "取扱なし", "取扱無"): return "取扱無"
     if s in ("2", "2.0", "◎"): return "◎"
     if s in ("1", "1.0", "▲"): return "▲"
-    if s in ("0", "0.0", "×", "✕"): return "×"
+    if s in ("0", "0.0", "×", "✕", "残無"): return "×"
     return s
 
 def fmt_funds_man(funds_yen: Any) -> str:
@@ -821,22 +823,40 @@ def extract_shares(row: Any, m_row: Any, yutai_content: str) -> int:
 
 # 主要・人気優待銘柄の正確かつ具体的な優待品名・金額マスタ（補完用）
 KNOWN_YUTAI = {
+    "1822": "QUOカード 500円分",
+    "2267": "ヤクルト「ライト会員」入会権 (約1,000円相当)",
+    "2464": "BBT 10%優待割引券",
+    "2586": "フルッタフルッタ 公式EC15%割引",
+    "2818": "ピエトロ 通信販売10%割引券",
     "3088": "マツキヨ商品券・ポイント 2,000円分",
     "3167": "QUOカード 500円分 (または飲料等)",
-    "4751": "ABEMAプレミアム 3ヶ月無料 (約3,540円相当)",
-    "6412": "PGMゴルフ割引優待券 2,000円分",
-    "8052": "QUOカード 2,000円分",
-    "8173": "Joshin買物優待券 5,000円分 (200円引×25枚)",
-    "9831": "お買物優待券 1,000円分 (500円引×2枚)",
-    "8136": "ピューロランド共通優待券3枚+買物券1,000円",
-    "7513": "ビックカメラ・コジマ共通商品券 1,000円分",
+    "3529": "アツギ 30%優待割引券",
+    "3569": "セーレン 20%優待割引券",
     "3679": "選べるギフトカタログ (約3,000円相当)",
+    "3710": "ジョルダン 乗換案内PREMIUM 半年利用権 (約1,980円相当)",
+    "4061": "デンカ 化粧品優待価格販売 (約2,000円相当)",
+    "4376": "くふうカンパニー グループサービス無料利用券・割引券",
+    "4539": "日本ケミファ ヘルスケア商品特別優待販売",
+    "4543": "テルモ 自社施設見学会 (抽選)",
+    "4658": "QUOカード 1,000円分",
+    "4661": "東京ディズニーリゾート 1デーパスポート 1枚 (約8,900円相当)",
+    "4719": "アルファS オリジナルカレンダー (約500円相当)",
+    "4751": "ABEMAプレミアム 3ヶ月無料 (約3,540円相当)",
+    "5262": "QUOカード 1,000円分",
+    "6412": "PGMゴルフ割引優待券 2,000円分",
+    "7419": "ノジマ買物優待割引券 (10%割引×5枚)",
+    "7458": "QUOカード 1,000円分",
+    "7513": "ビックカメラ・コジマ共通商品券 1,000円分",
+    "7638": "NEW ART HOLDINGS 優待割引カード",
+    "8052": "QUOカード 2,000円分",
+    "8136": "ピューロランド共通優待券3枚+買物券1,000円",
+    "8173": "Joshin買物優待券 5,000円分 (200円引×25枚)",
+    "8281": "ゼビオ 買物優待券 (20%引1枚+10%引4枚)",
     "9201": "株主優待割引券 (国内線50%割引)",
     "9202": "株主優待番号ご案内書 (国内線50%割引)",
-    "7458": "QUOカード 1,000円分",
-    "7419": "ノジマ買物優待割引券 (10%割引×5枚)",
-    "3844": "QUOカード 1,000円分",
-    "5262": "QUOカード 1,000円分",
+    "9347": "日本管財 ギフトカタログ 2,000円相当",
+    "9405": "QUOカード 500円分",
+    "9831": "お買物優待券 1,000円分 (500円引×2枚)",
 }
 
 def fmt_yutai_enhanced(content: str, yutai_val: Optional[float] = None, code: str = "") -> str:
@@ -1801,16 +1821,40 @@ def analyze_stocks(
         elif funds_yen < 99999990 and funds_yen > 0:
             nikko_cost = calc_nikko_cost(funds_yen, lend_days=item_lend_days)
             nikko_cost_str = f"¥{nikko_cost:,}"
-            if yutai_val is not None and yutai_val > 0:
-                net_profit_nikko = int(round(yutai_val - nikko_cost))
-                net_profit_nikko_str = f"¥{net_profit_nikko:,}"
+            effective_yutai_val = yutai_val
+            c_norm = fmt_code(code)
+            is_estimated_val = False
+            if (effective_yutai_val is None or effective_yutai_val <= 0) and c_norm in KNOWN_YUTAI_VALUES:
+                effective_yutai_val = KNOWN_YUTAI_VALUES[c_norm]
+                is_estimated_val = True
+
+            if effective_yutai_val is not None and effective_yutai_val > 0:
+                net_profit_nikko = int(round(effective_yutai_val - nikko_cost))
+                if is_estimated_val:
+                    net_profit_nikko_str = f"約¥{net_profit_nikko:,} (概算)"
+                else:
+                    net_profit_nikko_str = f"¥{net_profit_nikko:,}"
                 net_profit = net_profit_nikko
+            else:
+                if "割引" in y_content_str:
+                    net_profit_nikko_str = "🎟️ 割引優待"
+                    wait_label = "割引優待"
+                elif any(k in y_content_str for k in ["自社", "商品", "品", "カタログ"]):
+                    net_profit_nikko_str = "🎁 自社品優待"
+                    wait_label = "自社品優待"
+                elif "カレンダ" in y_content_str:
+                    net_profit_nikko_str = "📅 カレンダー"
+                    wait_label = "カレンダー"
+                else:
+                    net_profit_nikko_str = "定性優待"
+                    wait_label = "定性優待"
+
             nomura_item_daily_interest = int(round(funds_yen * nomura_rate / 365.0)) if has_nomura_loan else 0
             if d_n:
                 try:
                     daily_cost = funds_yen * annual_rate / 365.0
-                    if daily_cost > 0 and yutai_val is not None:
-                        limit_days_int = int(round(yutai_val / daily_cost))
+                    if daily_cost > 0 and effective_yutai_val is not None:
+                        limit_days_int = int(round(effective_yutai_val / daily_cost))
                 except Exception: pass
 
             # 待機節約額（あと1日・2日待機した場合に削減できる日興貸株料）
@@ -1820,9 +1864,9 @@ def analyze_stocks(
                 saving_str = f"1日:-¥{saving_1d:,} (2日:-¥{saving_2d:,})"
 
             # 損益分岐待機日数（優待価値から現行コストを引いた余力日数）
-            if yutai_val is not None and yutai_val > 0:
+            if effective_yutai_val is not None and effective_yutai_val > 0:
                 wait_days = calc_breakeven_wait_days(
-                    yutai_val=yutai_val,
+                    yutai_val=effective_yutai_val,
                     funds_yen=funds_yen,
                     current_nikko_cost=nikko_cost,
                     nomura_daily_cost=nomura_item_daily_interest
@@ -1873,11 +1917,11 @@ def analyze_stocks(
             "trend_sbi": c_trend.get("sbi", "―"),
             "total_qty": total_qty,
             "funds_man": funds_man,
-            "yutai_value": yutai_val,
+            "yutai_value": effective_yutai_val,
             "yutai_content_raw": str(m_row.get("yutai_content") or row.get("yutai_content") or ""),
             "yutai_content": fmt_yutai_enhanced(
                 str(m_row.get("yutai_content") or row.get("yutai_content") or ""),
-                yutai_val=yutai_val,
+                yutai_val=effective_yutai_val,
                 code=code
             ),
             "rights_month": str(rights_val),
@@ -1892,7 +1936,7 @@ def analyze_stocks(
             "wait_label": wait_label,
             "yield_pct": (
                 to_float(m_row.get("yield_pct") or row.get("yield_pct")) or 
-                (round((yutai_val / (funds_man * 10000.0)) * 100, 2) if (yutai_val and funds_man and funds_man > 0) else None)
+                (round((effective_yutai_val / (funds_man * 10000.0)) * 100, 2) if (effective_yutai_val and funds_man and funds_man > 0) else None)
             ),
             "net_profit": net_profit,
             "limit_days_int": limit_days_int,
@@ -2727,16 +2771,16 @@ def main():
                 "コード": str(r.get("code", "")),
                 "銘柄": str(r.get("name", "")),
                 "最低取得価格": str(r.get("funds_man_str", "―")),
-                "日興最新": str(r.get("nikko_display", "―")),
-                "SBI最新": str(r.get("sbi_display", "―")),
+                "日興最新": str(r.get("nikko_display", "取扱無")),
+                "SBI最新": str(r.get("sbi_display", "取扱無")),
                 "残数推移": str(r.get("trend_combined", "―")),
                 "優待内容": str(r.get("yutai_content", "―")),
                 "日興手数料": n_cost_display,
                 "待機節約": str(r.get("saving_str", "―")),
-                "実質手取": str(r.get("net_profit_nikko_str", "―")),
+                "実質手取": str(r.get("net_profit_nikko_str", "定性優待")),
                 "損益分岐": str(r.get("wait_label", "―")),
                 "その他証券": str(r.get("other_brokers", "―")),
-                "優待利回り": f"{r['yield_pct']:.1f}%" if r["yield_pct"] is not None else "―",
+                "優待利回り": f"{r['yield_pct']:.1f}%" if (r["yield_pct"] is not None and r["yield_pct"] > 0) else "―",
                 "判定": str(r.get("signal", "")),
             })
 
