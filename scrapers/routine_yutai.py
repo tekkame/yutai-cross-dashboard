@@ -85,11 +85,11 @@ def parse_qty(raw: str) -> float | None:
 def parse_sbi(raw: str) -> str:
     """SBI列の ◎, ▲, × を厳密に判定"""
     s = (raw or "").replace(" ", "").strip()
-    if "◎" in s or "2" in s:
+    if "◎" in s or s == "2":
         return "◎"
-    if "▲" in s or "1" in s:
+    if "▲" in s or s == "1":
         return "▲"
-    if "×" in s or "✕" in s or "0" in s or "残無" in s:
+    if "×" in s or "✕" in s or s == "0" or "残無" in s:
         return "×"
     return s if s else "―"
 

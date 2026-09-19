@@ -38,6 +38,7 @@ import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from config import DELISTED_CODES
 from scrapers.routine_yutai import KNOWN_YUTAI_VALUES
 
 # ============================================================
@@ -385,31 +386,15 @@ STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
 APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")
 APP_VERSION = "v13.2 (Data Freshness Optimization & Dash Elimination & Precision Accuracy)"
 
-# 上場廃止・持株会社統合・TOB成立済みの過去銘柄（画面・分析・集計から完全除外）
-DELISTED_CODES = {
-    "2352",  # ＷＯＷ　ＷＯＲＬＤ (上場廃止・持株会社化)
-    "3254",  # プレサンスコーポレーション (オープンハウスTOB上場廃止)
-    "3528",  # ミライノベート (Jトラスト吸収合併上場廃止)
-    "3814",  # アルファクス・フード・システム (上場廃止)
-    "4333",  # 東邦システムサイエンス (TOB上場廃止)
-    "4653",  # ダイオーズ (MBO上場廃止)
-    "6628",  # オンキヨー (債務超過上場廃止)
-    "7118",  # 伸和ホールディングス (取引不能)
-    "8356",  # 十六銀行 (十六FG設立に伴い上場廃止)
-    "8397",  # 沖縄海邦銀行 (非対象/統合)
-    "8521",  # 長野銀行 (八十二銀行経営統合上場廃止)
-    "9014",  # 新京成電鉄 (京成電鉄完全子会社化上場廃止)
-    "9266",  # 一休 (TOB上場廃止)
-    "9479",  # インプレスホールディングス (TOB上場廃止)
-    "9728",  # 日本管財 (日本管財HD[9347]設立に伴い上場廃止)
-}
+# 上場廃止・持株会社統合・TOB成立済みの過去銘柄（config.py から一元インポート済み）
+# DELISTED_CODES は画面・分析・集計から完全除外
 
 # 日興優待クロス料率 (制度買い現引金利: 約3.55%, 一般信用売り貸株料: 1.9%)
 DEFAULT_NIKKO_BUY_RATE = 0.0355
 DEFAULT_NIKKO_LEND_RATE = 0.019
 
-# 野村證券担保ローン年利 (2.4%)
-DEFAULT_NOMURA_RATE = 0.024
+# 野村證券担保ローン年利 (2.65%)
+DEFAULT_NOMURA_RATE = 0.0265
 
 def calc_nikko_cost(
     funds_yen: float,
@@ -442,7 +427,7 @@ def pick_first_valid(*vals: Any) -> Any:
 def calc_nomura_daily_interest(loan_man: float, rate: float = DEFAULT_NOMURA_RATE) -> int:
     """野村證券Web担保ローン 1日あたりの利息 (円)
     - loan_man: 借入金額 (万円)
-    - rate: 年利 (デフォルト 2.4%)
+    - rate: 年利 (デフォルト 2.65%)
     """
     if loan_man is None or loan_man <= 0:
         return 0
@@ -770,18 +755,29 @@ def fmt_funds_man(funds_yen: Any) -> str:
 # 株価キャッシュ & 自動補完エンジン
 # ============================================================
 _STOCK_PRICES_CACHE: Dict[str, float] = {}
+_STOCK_PRICES_LOCK = threading.Lock()
+
+def _save_stock_prices_cache(data: Dict[str, float]) -> None:
+    """株価キャッシュをアトミックに保存（破損・競合防止）"""
+    try:
+        tmp_file = STOCK_PRICES_CACHE_FILE.with_suffix(".tmp")
+        tmp_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_file.replace(STOCK_PRICES_CACHE_FILE)
+    except Exception:
+        pass
 
 def get_stock_price(code: str) -> Optional[float]:
     """キャッシュおよび必要に応じて株探から株価を取得（メモリ＋ファイルキャッシュ）"""
     global _STOCK_PRICES_CACHE
     c_norm = str(code).strip().zfill(4)
-    if not _STOCK_PRICES_CACHE and STOCK_PRICES_CACHE_FILE.exists():
-        try:
-            _STOCK_PRICES_CACHE = json.loads(STOCK_PRICES_CACHE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            _STOCK_PRICES_CACHE = {}
-    if c_norm in _STOCK_PRICES_CACHE and _STOCK_PRICES_CACHE[c_norm] > 0:
-        return _STOCK_PRICES_CACHE[c_norm]
+    with _STOCK_PRICES_LOCK:
+        if not _STOCK_PRICES_CACHE and STOCK_PRICES_CACHE_FILE.exists():
+            try:
+                _STOCK_PRICES_CACHE = json.loads(STOCK_PRICES_CACHE_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                _STOCK_PRICES_CACHE = {}
+        if c_norm in _STOCK_PRICES_CACHE and _STOCK_PRICES_CACHE[c_norm] > 0:
+            return _STOCK_PRICES_CACHE[c_norm]
 
     # キャッシュになければ株探から1回だけフェッチ
     url = f"https://kabutan.jp/stock/?code={c_norm}"
@@ -793,11 +789,9 @@ def get_stock_price(code: str) -> Optional[float]:
             m = re.search(r'<span class="kabuka">([0-9,.]+)円</span>', html_text)
             if m:
                 val = float(m.group(1).replace(",", ""))
-                _STOCK_PRICES_CACHE[c_norm] = val
-                try:
-                    STOCK_PRICES_CACHE_FILE.write_text(json.dumps(_STOCK_PRICES_CACHE, ensure_ascii=False, indent=2), encoding="utf-8")
-                except Exception:
-                    pass
+                with _STOCK_PRICES_LOCK:
+                    _STOCK_PRICES_CACHE[c_norm] = val
+                    _save_stock_prices_cache(_STOCK_PRICES_CACHE)
                 return val
     except Exception:
         pass
@@ -1802,6 +1796,14 @@ def analyze_stocks(
         net_profit_nikko_str = "―"
         nomura_item_daily_interest = 0
 
+        # 優待価値の確定（未知または0以下の場合は KNOWN_YUTAI_VALUES から推定値を補完）
+        effective_yutai_val = yutai_val
+        c_norm = fmt_code(code)
+        is_estimated_val = False
+        if (effective_yutai_val is None or effective_yutai_val <= 0) and c_norm in KNOWN_YUTAI_VALUES:
+            effective_yutai_val = KNOWN_YUTAI_VALUES[c_norm]
+            is_estimated_val = True
+
         is_expired = (item_lend_days == 0 and is_auto_days)
         saving_1d = 0
         saving_2d = 0
@@ -1821,12 +1823,6 @@ def analyze_stocks(
         elif funds_yen < 99999990 and funds_yen > 0:
             nikko_cost = calc_nikko_cost(funds_yen, lend_days=item_lend_days)
             nikko_cost_str = f"¥{nikko_cost:,}"
-            effective_yutai_val = yutai_val
-            c_norm = fmt_code(code)
-            is_estimated_val = False
-            if (effective_yutai_val is None or effective_yutai_val <= 0) and c_norm in KNOWN_YUTAI_VALUES:
-                effective_yutai_val = KNOWN_YUTAI_VALUES[c_norm]
-                is_estimated_val = True
 
             if effective_yutai_val is not None and effective_yutai_val > 0:
                 net_profit_nikko = int(round(effective_yutai_val - nikko_cost))
@@ -2072,9 +2068,9 @@ def main():
             min_value=0.1,
             max_value=15.0,
             value=float(round(nomura_rate_val * 100.0, 2)),
-            step=0.1,
+            step=0.05,
             format="%.2f",
-            help="現在の野村證券担保ローン金利 (年利2.40%)"
+            help="現在の野村證券担保ローン金利 (年利2.65%)"
         )
         rate_val = rate_percent_in / 100.0
 
@@ -2623,15 +2619,6 @@ def main():
             f'</div>'
         )
         st.markdown(alert_banner_html, unsafe_allow_html=True)
-
-    # ----------------------------------------------------
-    # メイン画面 権利月クイック切替バー
-    # ----------------------------------------------------
-    quick_months = month_options[:6]  # 向こう半年分
-    quick_labels = {m: f"{m.split('-')[1]}月 ({m})" + (" ✅" if any(x["month"] == m and x["has_data"] for x in available_months_info) else " ⚠️") for m in quick_months}
-    if chosen_month not in quick_months:
-        quick_months.append(chosen_month)
-        quick_labels[chosen_month] = f"{chosen_month.split('-')[1]}月 ({chosen_month})"
 
     # ----------------------------------------------------
     # メイン画面 権利月クイック切替バー (ステートレス・ピルボタン群で巻き戻りバグ完全根絶)
