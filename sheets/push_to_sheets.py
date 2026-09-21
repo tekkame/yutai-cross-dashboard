@@ -17,8 +17,10 @@ sys.stdout.reconfigure(encoding='utf-8')
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 
-def push_latest_to_gas(gas_url: str, secret: str = "yutai777") -> bool:
+def push_latest_to_gas(gas_url: str, secret: str | None = None) -> bool:
     """最新の history CSV を読み込んで GAS Webhook 経由でスプレッドシートに反映"""
+    if secret is None:
+        secret = os.environ.get("APP_KEY", "your_secret_key_here")  # 実キーはOS環境変数 APP_KEY
     if not gas_url:
         print("[SHEETS] GAS_WEBHOOK_URL が設定されていないためスキップします。")
         return False
@@ -58,4 +60,5 @@ def push_latest_to_gas(gas_url: str, secret: str = "yutai777") -> bool:
 
 if __name__ == "__main__":
     url = os.environ.get("GAS_WEBHOOK_URL", "")
-    push_latest_to_gas(url)
+    secret_key = os.environ.get("APP_KEY", "your_secret_key_here")
+    push_latest_to_gas(url, secret=secret_key)

@@ -9,11 +9,15 @@
  */
 
 // ============ 設定 ============
+// ⚠️ セキュリティ: SpreadsheetID / APIキーはScriptPropertiesで管理してください。
+// GASエディタ > [プロジェクトの設定] > [スクリプトプロパティ] に以下を登録:
+//   SPREADSHEET_ID = <実際のスプレッドシートID>
+//   API_SECRET_KEY = <実際のWebhook認証キー>
 const CFG = {
-  DEFAULT_SPREADSHEET_ID: '175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM',
+  DEFAULT_SPREADSHEET_ID: PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID') || 'your_spreadsheet_id_here',
   NIKKO_TH: 10000,       // 日興 在庫アラート閾値 (株)
   RAKUTEN_TH: 5000,      // 楽天 在庫アラート閾値 (株)
-  API_SECRET_KEY: 'yutai777', // Webhook 簡易認証キー
+  API_SECRET_KEY: PropertiesService.getScriptProperties().getProperty('API_SECRET_KEY') || 'your_secret_key_here', // Webhook 簡易認証キー
 };
 
 const ROUTINE_BASE = 'https://yutai.enjoy-lcl.com';
