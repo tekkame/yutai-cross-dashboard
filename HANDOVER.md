@@ -1,7 +1,8 @@
 # 引継ぎメモ：株主優待クロス在庫トラッカー
 
-最終更新：2026-09-13（JST）。このファイルは別セッション・別モデルへの申し送り用。
+最終更新：2026-09-21（JST）。このファイルは別セッション・別モデルへの申し送り用。
 技術詳細は `README.md`、実装は各ソースを参照。
+
 
 ## 1. 作りたいもの・目的
 
@@ -109,3 +110,64 @@ Python版の live 実行（`python main.py`）には環境変数 `GCP_SERVICE_AC
 - Google Cloud登録は行わない（ユーザー判断）。そのため Actions 方式は待機、GAS方式が現行。
 - auto-watch既定：`yield>=1,funds<=30`（利回り1%以上・資金30万円以下）。GAS初回は約59件ONになる見込み。
 - 貸株料年率は仮定値 1.1%（`KASHIKABU_ANNUAL_RATE`／GAS側 `CFG.RATE`）。厳密化は将来課題。
+
+---
+
+## 9. セキュリティ監査・環境変数移行（2026-09-21 実施済み）
+
+### 実施内容サマリー
+
+OpenCode等の外部AIエージェントによるリポジトリ読み取りリスクへの対応として、ワークスペース全体のシークレット監査・サニタイズ・Windows環境変数への移行を実施。
+
+### 検出・対応済みシークレット一覧
+
+| ファイル | 変数名 | 対応内容 |
+|---|---|---|
+| `yutai_longterm_db.gs` | `DEFAULT_SPREADSHEET_ID` | ハードコードを除去 → `PropertiesService.getScriptProperties()` 経由に変更 |
+| `yutai_longterm_db.gs` | `API_SECRET_KEY` | 同上 |
+| `app.py` L386 | `APP_SECRET_KEY` fallback値 | `"yutai777"` → `"your_secret_key_here"` に変更 |
+| `sheets/push_to_sheets.py` | `secret` デフォルト引数 | `"yutai777"` → `os.environ.get("APP_KEY")` に変更 |
+| **git remote URL** | `GITHUB_TOKEN` (PAT) | **URLに直埋めされていたPATを除去**。トークンなしURLに変更 |
+
+### Windows ユーザー環境変数（登録済み）
+
+以下の `.NET API` 構文で永続登録済み（`setx` の1024文字制限を回避）:
+
+```powershell
+[System.Environment]::SetEnvironmentVariable('SPREADSHEET_ID', '175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM', 'User')
+[System.Environment]::SetEnvironmentVariable('APP_KEY',        'yutai777', 'User')
+[System.Environment]::SetEnvironmentVariable('GITHUB_TOKEN',   'ghp_Hdg...cfK6j', 'User')  # 実値はOS内のみ
+```
+
+**注意**: 新しいターミナルを開くと自動で反映。既存ターミナルでは以下で即時反映:
+```powershell
+$env:SPREADSHEET_ID = [System.Environment]::GetEnvironmentVariable('SPREADSHEET_ID','User')
+$env:APP_KEY        = [System.Environment]::GetEnvironmentVariable('APP_KEY','User')
+$env:GITHUB_TOKEN   = [System.Environment]::GetEnvironmentVariable('GITHUB_TOKEN','User')
+```
+
+### GitHub / Streamlit Cloud デプロイ状況
+
+- **GitHubリポジトリ**: `tekkame/yutai-cross-dashboard` — 正常稼働
+- **GitHub Actions (`daily_scraper`)**: 毎日JST 17:00/20:00に自動実行中。直近3回は全て `success`
+  - 最終成功: 2026-09-21 06:09 JST（コミット `5191078`）
+- **Streamlit Cloud**: `https://tekkame-yutai-cross-dashboard-app-uhssit.streamlit.app/` のような形でデプロイ中と推定。**実際のURLはStreamlit CloudのダッシュボードでGitHub連携を確認すること**（ログイン認証が必要なため自動確認不可）
+- **サニタイズコミット**: `013f943` `security: sanitize hardcoded secrets - move to env vars / GAS ScriptProperties` がmainにマージ済み
+
+### GAS 側の残手動作業（未完了）
+
+`yutai_longterm_db.gs` を `PropertiesService.getScriptProperties()` 経由に変更済みだが、**GASエディタ側にプロパティ値を登録する必要がある**:
+
+1. [GASエディタ](https://script.google.com/) → 対象プロジェクト → [プロジェクトの設定] → [スクリプトプロパティ]
+2. 以下を追加:
+   - `SPREADSHEET_ID` = `175sKtMVVp6IgqrzLcRtO5tX7t-wiEKQrrfagfRoH1gM`
+   - `API_SECRET_KEY` = `yutai777`
+
+### 読み込み互換性（確認済み）
+
+全Pythonファイルが `os.environ.get()` でOS環境変数を直接参照。`python-dotenv` は不使用。`.env` ファイルも存在しない。**dotenv移行は不要**。
+
+### `.gitignore` 追加推奨（任意）
+
+現在 `.gs` ファイルはgitignore対象外。今後GAS内にシークレットを書かないルールを徹底するか、`.gs` をgitignore対象にすることを検討。
+
