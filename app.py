@@ -383,7 +383,7 @@ DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 SETTINGS_FILE = DATA_DIR / "user_settings.json"
 STOCK_PRICES_CACHE_FILE = DATA_DIR / "stock_prices_cache.json"
-APP_SECRET_KEY = safe_get_secret("APP_KEY", "your_secret_key_here")  # 実キーはOS環境変数 APP_KEY で設定
+APP_SECRET_KEY = safe_get_secret("APP_KEY", "yutai777")  # Streamlit Cloud Secrets: APP_KEY=yutai777 を設定推奨
 APP_VERSION = "v13.2 (Data Freshness Optimization & Dash Elimination & Precision Accuracy)"
 
 # 上場廃止・持株会社統合・TOB成立済みの過去銘柄（config.py から一元インポート済み）
